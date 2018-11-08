@@ -1028,8 +1028,8 @@ def produce_summary(
                    distance_from_snp])
 
 
-    genes_from_file = dict.fromkeys(genes_from_file).keys()
-    snps_from_file = dict.fromkeys(snps_from_file).keys()
+    genes_from_file = list(set(genes_from_file))
+    snps_from_file = list(set(snps_from_file))
     snps_genes = [(snp, gene) for snp in snps_from_file
                     for gene in genes_from_file]
 
@@ -1038,7 +1038,7 @@ def produce_summary(
     GENE_DF = pandas.read_table(expression_table_fp, index_col="Description",
                                  engine='c', compression=None, memory_map=True)
 
-    all_tissues = list(GENE_DF)
+    all_tissues = list(set(GENE_DF))
     genes_tissues = [(gene, tissue) for gene in genes_from_file
                         for tissue in all_tissues]
 
