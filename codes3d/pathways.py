@@ -6,7 +6,6 @@ from __future__ import print_function
 from sys import argv
 import os
 from StringIO import StringIO
-from pprint import PrettyPrinter
 from json import loads
 import sqlite3
 from pycurl import Curl
@@ -25,8 +24,8 @@ def wikipathways(gene, exclude_reactome=True):
               'organism': 'http://identifiers.org/taxonomy/9606'
              }
 
-    pathways = {('Wikipathways', pathway['identifier']): pathway['name']
-                for pathway in wp_client.find_pathways_by_text(**kwargs)}
+    pathways = [('Wikipathways', pathway['identifier'], pathway['name'])
+                for pathway in wp_client.find_pathways_by_text(**kwargs)]
 
     if not exclude_reactome:
         return pathways
@@ -34,16 +33,19 @@ def wikipathways(gene, exclude_reactome=True):
     base_url = 'https://www.wikipathways.org/index.php'
     client = Curl()
     query_buffer = StringIO()
-    unique_pathways = {}
-    for pathway_id in pathways:
-        client.setopt(client.URL, '%s/Pathway:%s' % (base_url, pathway_id[1]))
+    unique_pathways = []
+    for pathway in pathways:
+        client.setopt(client.URL, '%s/Pathway:%s' % (base_url, pathway[1]))
         client.setopt(client.WRITEDATA, query_buffer)
         client.perform()
+
+        if client.getinfo(HTTP_CODE) != 200:
+            continue
 
         response = query_buffer.getvalue()
         query_buffer.truncate(0)
         if 'http://www.reactome.org/PathwayBrowser/#DIAGRAM=' not in response:
-            unique_pathways[pathway_id] = pathways[pathway_id]
+            unique_pathways.append(pathway)
 
     return unique_pathways
 
@@ -59,7 +61,7 @@ def reactome(gene):
     client.perform()
 
     if client.getinfo(HTTP_CODE) != 200:
-        return {}
+        return []
 
     gene_response = loads(query_buffer.getvalue())
     query_buffer.truncate(0)
@@ -71,7 +73,7 @@ def reactome(gene):
                 if 'Homo sapiens' in entry['species']:
                     gene_ids.append(entry['stId'])
 
-    pathways = {}
+    pathways = []
     for gene_id in gene_ids:
         for url_variant in ('', 'diagram/'):
             client.setopt(client.URL,
@@ -86,10 +88,10 @@ def reactome(gene):
             pathway_response = loads(query_buffer.getvalue())
             query_buffer.truncate(0)
             for pathway in pathway_response:
-                pathways[('Reactome', pathway['stId'].encode('utf-8'))] = pathway[
-                    'displayName'].encode('utf-8')
+                pathways.append(('Reactome', pathway['stId'].encode('utf-8'),
+                                pathway['displayName'].encode('utf-8')))
 
-    return pathways
+    return list(set(pathways))
 
 def reactome_in_wikipathways(gene):
     """Identify pathways present in WikiPathways and Reactome"""
@@ -98,11 +100,15 @@ def reactome_in_wikipathways(gene):
     client = Curl()
 
     pathways = wikipathways(gene, False)
-    common_pathways = {}
+    common_pathways = []
     for pathway_id in pathways:
         client.setopt(client.URL, '%s/Pathway:%s' % (base_url, pathway_id[1]))
         client.setopt(client.WRITEDATA, query_buffer)
         client.perform()
+
+        if client.getinfo(HTTP_CODE) != 200:
+            continue
+
         response = query_buffer.getvalue()
         query_buffer.truncate(0)
 
@@ -115,7 +121,7 @@ def reactome_in_wikipathways(gene):
             reactome_id += response[position]
             position += 1
 
-        common_pathways[('Reactome', reactome_id)] = pathways[pathway_id]
+        common_pathways.append(('Reactome', reactome_id, pathways[pathway_id]))
 
     return common_pathways
 
@@ -129,12 +135,16 @@ def kegg(gene):
     client.setopt(client.URL, '%s/find/genes/%s' % (api_url, gene))
     client.setopt(client.WRITEDATA, query_buffer)
     client.perform()
+
+    if client.getinfo(HTTP_CODE) != 200:
+       return []
+
     gene_entries = [entry for entry in
                     query_buffer.getvalue().split('\n') if entry]
     query_buffer.truncate(0)
 
     if not gene_entries:
-        return {}
+        return []
 
     gene_ids = []
     for entry in gene_entries:
@@ -143,13 +153,17 @@ def kegg(gene):
             gene_ids.append(entry[0])
 
     if not gene_ids:
-        return {}
+        return []
 
-    pathways = {}
+    pathways = []
     for gene_id in gene_ids:
         client.setopt(client.URL, '%s/link/pathway/%s' % (api_url, gene_id))
         client.setopt(client.WRITEDATA, query_buffer)
         client.perform()
+
+        if client.getinfo(HTTP_CODE) != 200:
+            return []
+
         pathway_ids = [entry.split('\t')[1] for entry
                        in query_buffer.getvalue().split('\n') if entry]
         query_buffer.truncate(0)
@@ -163,9 +177,9 @@ def kegg(gene):
             client.perform()
             pathway_response = query_buffer.getvalue().split('\n')
             pathway_name = pathway_response[1][5:-23].strip()
-            pathways[('KEGG', pathway_id)] = pathway_name
+            pathways.append(('KEGG', pathway_id, pathway_name))
 
-    return pathways
+    return list(set(pathways))
 
 def build_consensuspathdb():
     """Build inverted local ConsensusPathDB database"""
@@ -229,32 +243,31 @@ def consensuspathdb(gene):
     db_connect = sqlite3.connect(db_dir)
     db_cursor = db_connect.cursor()
 
-    pathways = {}
+    pathways = []
     query = (gene,)
     for entry in db_cursor.execute("""SELECT database, pathway_id, pathway_label
                                       FROM pathways
                                       WHERE gene=?""", query):
         entry = [subentry.encode('utf-8') for subentry in entry]
-        pathways[(entry[0], entry[1])] = entry[2]
+        pathways.append((entry[0], entry[1], entry[2]))
 
     db_connect.close()
 
     return pathways
 
 
-def get_pathways(gene):
-    """All"""
-    pathways = {}
-    databases = (kegg, reactome, wikipathways, consensuspathdb, pathwaycommons)
+def pathways(gene):
+    pathways = []
+    databases = (kegg, reactome, wikipathways, consensuspathdb)
 
     for database in databases:
-        pathways.update(database(gene))
+        pathways.extend(database(gene))
 
     return pathways
 
 def pathwaycommons(gene):
     """Pathway Commons"""
-    pass
+    return gene
 
 
 def main():
@@ -262,13 +275,12 @@ def main():
     with open(argv[1]) as gene_file:
         genes = gene_file.read().splitlines()
 
-    pprinter = PrettyPrinter()
     build_consensuspathdb()
-
     for gene in genes:
-        print('\n%s' % gene)
-        pprinter.pprint(pathwaycommons(gene))
-
+        print(gene)
+        for pathway in pathways(gene):
+            print(pathway)
+        print()
     remove_consensuspathdb()
 
 if __name__ == '__main__':
