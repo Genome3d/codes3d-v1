@@ -1038,7 +1038,7 @@ def produce_summary(
     GENE_DF = pandas.read_table(expression_table_fp, index_col="Description",
                                  engine='c', compression=None, memory_map=True)
 
-    all_tissues = list(set(GENE_DF))
+    all_tissues = list(GENE_DF)
     genes_tissues = [(gene, tissue) for gene in genes_from_file
                         for tissue in all_tissues]
 
