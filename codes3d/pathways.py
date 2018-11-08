@@ -15,6 +15,9 @@ import configparser
 from requests import post
 from wikipathways_api_client import WikipathwaysApiClient
 
+EXCLUDE_FROM_CPDB = set(['KEGG', 'Reactome', 'Wikipathways'])
+EXCLUDE_FROM_PC = set(['KEGG', 'Reactome', 'Wikipathways'])
+
 def wikipathways(gene, exclude_reactome=True):
     """Wikipathways"""
     wp_client = WikipathwaysApiClient()
@@ -186,9 +189,11 @@ def build_consensuspathdb():
 
     for line in pathway_data:
         line = line.split('\t')
-        pathway_label = unicode(line[0], 'utf-8')
-        pathway_id = unicode(line[1], 'utf-8')
         database = unicode(line[2], 'utf-8')
+        if database in EXCLUDE_FROM_CPDB:
+            continue
+        pathway_id = unicode(line[1], 'utf-8')
+        pathway_label = unicode(line[0], 'utf-8')
         genes = line[3].split(',')
 
         for gene in genes:
@@ -225,11 +230,10 @@ def consensuspathdb(gene):
     db_cursor = db_connect.cursor()
 
     pathways = {}
-    query = (gene, 'KEGG', 'Reactome', 'Wikipathways')
+    query = (gene,)
     for entry in db_cursor.execute("""SELECT database, pathway_id, pathway_label
                                       FROM pathways
-                                      WHERE gene=?
-                                      AND database NOT IN (?, ?, ?)""", query):
+                                      WHERE gene=?""", query):
         entry = [subentry.encode('utf-8') for subentry in entry]
         pathways[(entry[0], entry[1])] = entry[2]
 
@@ -237,15 +241,21 @@ def consensuspathdb(gene):
 
     return pathways
 
+
 def get_pathways(gene):
-    """All databases"""
+    """All"""
     pathways = {}
-    databases = (consensuspathdb, kegg, reactome, wikipathways)
+    databases = (kegg, reactome, wikipathways, consensuspathdb, pathwaycommons)
 
     for database in databases:
         pathways.update(database(gene))
 
     return pathways
+
+def pathwaycommons(gene):
+    """Pathway Commons"""
+    pass
+
 
 def main():
     """Test functionality"""
@@ -256,8 +266,8 @@ def main():
     build_consensuspathdb()
 
     for gene in genes:
-        print(gene)
-        pprinter.pprint(get_pathways(gene))
+        print('\n%s' % gene)
+        pprinter.pprint(pathwaycommons(gene))
 
     remove_consensuspathdb()
 
