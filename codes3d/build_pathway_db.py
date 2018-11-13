@@ -101,12 +101,13 @@ def kegg(gene):
             pathway_name = pathway_name.replace(
                 "- Homo sapiens (human)", "").strip()
 
-            pathways.add((gene,
-                          "KEGG",
-                          pathway_id,
-                          "NA",
-                          pathway_name,
-                          "".join([KEGG_ENTRY_URL, pathway_id])))
+            pathways.add((unicode(gene, "utf-8"),
+                          unicode("KEGG", "utf-8"),
+                          unicode(pathway_id, "utf-8"),
+                          1,
+                          unicode(pathway_name, "utf-8"),
+                          unicode("".join([KEGG_ENTRY_URL, pathway_id]),
+                                  "utf-8")))
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
@@ -167,14 +168,15 @@ def reactome(gene):
             query_buffer.truncate(0)
 
             for pathway in pathway_response:
-                pathways.add(
-                    (gene,
-                     "Reactome",
-                     pathway["stId"].encode("utf-8"),
-                     pathway["stIdVersion"].split(".")[1],
-                     pathway["displayName"].encode("utf-8"),
-                     "".join([REACTOME_ENTRY_URL,
-                              pathway["stId"].encode("utf-8")])))
+                pathways.add((
+                    unicode(gene, "utf-8"),
+                    unicode("Reactome", "utf-8"),
+                    pathway["stId"],
+                    int(pathway["stIdVersion"].split(".")[1]),
+                    pathway["displayName"],
+                    unicode("".join([REACTOME_ENTRY_URL,
+                                     pathway["stId"].encode("utf-8")]),
+                            "utf-8")))
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
@@ -185,12 +187,12 @@ def wikipathways(gene, exclude_reactome=True):
               "organism": "http://identifiers.org/taxonomy/9606"
              }
 
-    pathways = set((gene,
-                    "WikiPathways",
-                    pathway["identifier"],
-                    pathway["version"],
-                    pathway["name"],
-                    pathway["web_page"])
+    pathways = set((unicode(gene, "utf-8"),
+                    unicode("WikiPathways", "utf-8"),
+                    unicode(pathway["identifier"], "utf-8"),
+                    int(pathway["version"]),
+                    unicode(pathway["name"], "utf-8"),
+                    unicode(pathway["web_page"], "utf-8"))
                    for pathway in wp_client.find_pathways_by_text(**kwargs))
 
     if not exclude_reactome:
@@ -225,7 +227,6 @@ def build_pathway_db():
         genes = gene_file.read().splitlines()
 
     gene_num_bar = progressbar.ProgressBar(max_value=len(genes))
-    gene_num_bar.update(0)
 
     genes = sorted(dict.fromkeys(genes).keys(),
                    key=lambda gene: gene.capitalize())
