@@ -4,6 +4,7 @@
 
 from __future__ import print_function
 import os
+from time import sleep
 from StringIO import StringIO
 from json import loads as json
 import sqlite3
@@ -12,6 +13,7 @@ import csv
 from pycurl import Curl
 from pycurl import error as PycurlError
 from pycurl import HTTP_CODE
+from requests.exceptions import ConnectionError
 import configparser
 import progressbar
 from wikipathways_api_client import WikipathwaysApiClient
@@ -255,7 +257,15 @@ def build_pathway_db():
 
     for i, gene in enumerate(genes):
         for database in (kegg, reactome, wikipathways):
-            for pathway in database(gene):
+
+            while True:
+                try:
+                    pathways = database(gene)
+                    break
+                except ConnectionError:
+                    sleep(300)
+
+            for pathway in pathways:
                 pathway_db_cursor.execute("""
                     INSERT INTO pathways
                     VALUES (?, ?, ?, ?, ?, ?)
