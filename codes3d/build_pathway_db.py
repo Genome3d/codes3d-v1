@@ -9,7 +9,7 @@ from StringIO import StringIO
 from json import loads as json
 import sqlite3
 import argparse
-import csv
+import unicodecsv as csv
 from pycurl import Curl
 from pycurl import error as PycurlError
 from pycurl import HTTP_CODE
