@@ -189,13 +189,18 @@ def wikipathways(gene, exclude_reactome=True):
               "organism": "http://identifiers.org/taxonomy/9606"
              }
 
-    pathways = set((unicode(gene, "utf-8"),
-                    unicode("WikiPathways", "utf-8"),
-                    unicode(pathway["identifier"], "utf-8"),
-                    int(pathway["version"]),
-                    unicode(pathway["name"], "utf-8"),
-                    unicode(pathway["web_page"], "utf-8"))
-                   for pathway in wp_client.find_pathways_by_text(**kwargs))
+    try:
+        pathways = set((unicode(gene, "utf-8"),
+                        unicode("WikiPathways", "utf-8"),
+                        unicode(pathway["identifier"], "utf-8"),
+                        int(pathway["version"]),
+                        unicode(pathway["name"], "utf-8"),
+                        unicode(pathway["web_page"], "utf-8"))
+                    for pathway in wp_client.find_pathways_by_text(**kwargs))
+
+    except ConnectionError:
+        sleep(300)
+        wikipathways(gene)
 
     if not exclude_reactome:
         return sorted(list(pathways), key=lambda pathway: pathway[2])
@@ -257,15 +262,7 @@ def build_pathway_db():
 
     for i, gene in enumerate(genes):
         for database in (kegg, reactome, wikipathways):
-
-            while True:
-                try:
-                    pathways = database(gene)
-                    break
-                except ConnectionError:
-                    sleep(300)
-
-            for pathway in pathways:
+            for pathway in database(gene):
                 pathway_db_cursor.execute("""
                     INSERT INTO pathways
                     VALUES (?, ?, ?, ?, ?, ?)
