@@ -1225,65 +1225,6 @@ def natural_keys(text):
 def abs_value_ticks(x, pos):
     return abs(x)
 
-
-def retrieve_pathways(eqtls, fdr_threshold, num_processes, output_dir):
-    print("Retrieving pathway information...")
-    manager = multiprocessing.Manager()
-    procPool = multiprocessing.Pool(processes=num_processes)
-    pathways = {}  # Keeps track of all pathways covered by genes with a statistically signficant eQTL relationship with a query SNP
-    pwresults = manager.list()
-
-    for snp in eqtls:
-        for gene in eqtls[snp]:
-            if not gene == "snp_info":
-                for tissue in eqtls[snp][gene]["tissues"]:
-                    if eqtls[snp][gene]["tissues"][tissue]["qvalue"] < fdr_threshold:
-                        procPool.apply_async(
-                            get_wikipathways_response, [
-                                snp, gene, tissue, pwresults])
-    procPool.close()
-    procPool.join()
-
-    for response in pwresults:
-        snp = response[0]
-        gene = response[1]
-        tissue = response[2]
-        for pwres in response[3]:
-            pwid = pwres["identifier"]
-            if not pwid in pathways:
-                pathways[pwid] = {}
-                pathways[pwid]["name"] = pwres["name"]
-                pathways[pwid]["genes"] = {}
-            if not gene in pathways[pwid]["genes"]:
-                pathways[pwid]["genes"][gene] = {}
-            if not snp in pathways[pwid]["genes"][gene]:
-                pathways[pwid]["genes"][gene][snp] = set([])
-            pathways[pwid]["genes"][gene][snp].add(tissue)
-
-    with open(output_dir + "/pathways.txt", 'w') as pwfile:
-        pwfile.write(
-            "WikiPathways_ID\tPathway_Name\tGene_Symbol\tSNP\tTissue\n")
-        for pwid in pathways:
-            for gene in pathways[pwid]["genes"]:
-                for snp in pathways[pwid]["genes"][gene]:
-                    for tissue in pathways[pwid]["genes"][gene][snp]:
-                        pwfile.write(
-                            "%s\t%s\t%s\t%s\t%s\n" %
-                            (pwid, pathways[pwid]["name"], gene, snp, tissue))
-    return pathways
-
-
-def get_wikipathways_response(snp, gene, tissue, pwresults):
-    wikipathways = wikipathways_api_client.WikipathwaysApiClient()
-    kwargs = {
-        'query': gene,
-        'organism': 'http://identifiers.org/taxonomy/9606'  # Homo sapiens
-    }
-    res = wikipathways.find_pathways_by_text(**kwargs)
-    if res:
-        pwresults.append([snp, gene, tissue, res])
-
-
 def parse_snps_files(snps_files):
     snps = {}
     for snp_file in snps_files:
@@ -1959,6 +1900,49 @@ def build_eqtl_index(
         os.remove(table_fp)
 
 
+def parse_summary_file(
+        summary_file,
+        buffer_size):
+
+    gene_exp = {}
+    with open(summary_file, buffering=buffer_size) as summary:
+        next(summary)
+        for line in summary:
+            line = line.split("\t")
+
+            gene = line[3]
+            if gene not in gene_exp:
+                gene_exp[gene] = {}
+                gene_exp[gene]['max_tissue'] = line[18]
+                try:
+                    gene_exp[gene]['max_rate'] = float(line[19])
+                except ValueError:
+                    gene_exp[gene]['max_rate'] = line[19]
+                gene_exp[gene]['min_tissue'] = line[20]
+                try:
+                    gene_exp[gene]['min_rate'] = float(line[21])
+                except ValueError:
+                    gene_exp[gene]['min_rate'] = line[21]
+
+            tissue = line[7]
+            if tissue not in gene_exp[gene]:
+                try:
+                    gene_exp[gene][tissue] = float(line[17])
+                except ValueError:
+                    gene_exp[gene][tissue] = line[17]
+
+    return gene_exp
+
+
+def produce_pathway_summary(
+        gene_exp,
+        pathway_db_fp,
+        output_dir,
+        buffer_size,
+        num_proc):
+
+    print(gene_exp)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="")
     parser.add_argument("-i", "--inputs", nargs='+', required=True,
@@ -2006,7 +1990,7 @@ if __name__ == "__main__":
     parser.add_argument("-t", "--num_processes_summary", type=int,
                         default=min(psutil.cpu_count(), 32),
                         help="The number of processes for compilation of " +\
-                        "the results (default: %s)." %
+                        "results (default: %s)." %
                         str(min(psutil.cpu_count(), 32)))
     args = parser.parse_args()
     config = configparser.ConfigParser()
@@ -2059,7 +2043,9 @@ if __name__ == "__main__":
         args.fdr_threshold, args.local_databases_only,
         args.num_processes, args.output_dir, gene_dict_fp, snp_dict_fp,
         suppress_intermediate_files=args.suppress_intermediate_files)
-    produce_summary(
+    gene_exp = produce_summary(
          p_values, snps, genes, gene_database_fp, expression_table_fp,
          args.fdr_threshold, args.output_dir, args.buffer_size_in,
+         args.buffer_size_out, args.num_processes_summary)
+    produce_pathway_summary(gene_exp, pathway_db_fp, args.output_dir,
          args.buffer_size_out, args.num_processes_summary)
