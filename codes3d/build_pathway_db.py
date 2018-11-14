@@ -43,7 +43,6 @@ def kegg(gene):
         return []
 
     if client.getinfo(HTTP_CODE) != 200:
-        logging.critical("MALFORMED RESPONSE: KEGG: %s", gene)
         return []
 
     gene_response = query_buffer.getvalue().split("\n")
@@ -76,7 +75,6 @@ def kegg(gene):
             continue
 
         if client.getinfo(HTTP_CODE) != 200:
-            logging.critical("MALFORMED RESPONSE: KEGG: %s", gene_id)
             continue
 
         pathway_response = query_buffer.getvalue().split("\n")
@@ -98,7 +96,6 @@ def kegg(gene):
                 continue
 
             if client.getinfo(HTTP_CODE) != 200:
-                logging.critical("MALFORMED RESPONSE: KEGG: %s", pathway_id)
                 continue
 
             pathway_response = query_buffer.getvalue().split("\n")
@@ -141,7 +138,6 @@ def reactome(gene):
         return []
 
     if client.getinfo(HTTP_CODE) != 200:
-        logging.critical("MALFORMED RESPONSE: Reactome: %s", gene)
         return []
 
     try:
@@ -174,7 +170,6 @@ def reactome(gene):
                 continue
 
             if client.getinfo(HTTP_CODE) != 200:
-                logging.critical("MALFORMED RESPONSE: Reactome: %s", gene_id)
                 continue
 
             try:
@@ -214,8 +209,8 @@ def wikipathways(gene, exclude_reactome=True):
                        for pathway in wp_client.find_pathways_by_text(**kwargs))
 
     except ConnectionError:
-        logging.critical("ERROR: Wikipathways: %s", gene)
-        sleep(300)
+        logging.critical("ERROR: WikiPathways: %s", gene)
+        sleep(3)
         wikipathways(gene)
 
     if not exclude_reactome:
@@ -290,9 +285,8 @@ def log_reactome_release():
     logging.info("Reactome version: %s", release)
 
 def log_wikipathways_release():
-    """Write generic WikiPathways release information to log file"""
-    logging.info("Wikipathways version: %s.%s", datetime.now().month,
-                 datetime.now().year)
+    """Write WikiPathways release information to log file"""
+    logging.info("WikiPathways version: NA")
 
 def build_pathway_db():
     """Build the pathway database"""
