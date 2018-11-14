@@ -210,8 +210,8 @@ def wikipathways(gene, exclude_reactome=True):
 
     except ConnectionError:
         logging.critical("ERROR: WikiPathways: %s", gene)
-        sleep(3)
-        wikipathways(gene)
+        sleep(300)
+        pathways = wikipathways(gene)
 
     if not exclude_reactome:
         return sorted(list(pathways), key=lambda pathway: pathway[2])
