@@ -7,8 +7,10 @@ import os
 from time import sleep
 from StringIO import StringIO
 from json import loads as json
+import logging
 import sqlite3
 import argparse
+from datetime import datetime
 import unicodecsv as csv
 from pycurl import Curl
 from pycurl import error as PycurlError
@@ -19,12 +21,15 @@ import progressbar
 from wikipathways_api_client import WikipathwaysApiClient
 
 KEGG_API_URL = "http://rest.kegg.jp"
+KEGG_INFO_URL = "http://rest.kegg.jp/info/pathway"
 KEGG_ENTRY_URL = "https://www.genome.jp/dbget-bin/www_bget?"
-REACTOME_API_URL = "https://reactome.org/ContentService"
-REACTOME_ENTRY_URL = "https://reactome.org/PathwayBrowser/#DIAGRAM="
+REACTOME_API_URL = "https://www.reactome.org/ContentService"
+REACTOME_INFO_URL = "https://reactome.org/ContentService/data/database/version"
+REACTOME_ENTRY_URL = "https://www.reactome.org/PathwayBrowser/#DIAGRAM="
+REACTOME_ORIGIN_SUFFIX = "reactome.org/PathwayBrowser/#DIAGRAM="
 
 def kegg(gene):
-    """Kyoto Encyclopedia of Genes and Genomes"""
+    """Query Kyoto Encyclopedia of Genes and Genomes for HGNC-Symbol"""
     query_buffer = StringIO()
     client = Curl()
 
@@ -34,9 +39,11 @@ def kegg(gene):
     try:
         client.perform()
     except PycurlError:
+        logging.critical("ERROR: KEGG: %s", gene)
         return []
 
     if client.getinfo(HTTP_CODE) != 200:
+        logging.critical("MALFORMED RESPONSE: KEGG: %s", gene)
         return []
 
     gene_response = query_buffer.getvalue().split("\n")
@@ -65,9 +72,11 @@ def kegg(gene):
         try:
             client.perform()
         except PycurlError:
+            logging.critical("ERROR: KEGG: %s", gene_id)
             continue
 
         if client.getinfo(HTTP_CODE) != 200:
+            logging.critical("MALFORMED RESPONSE: KEGG: %s", gene_id)
             continue
 
         pathway_response = query_buffer.getvalue().split("\n")
@@ -85,9 +94,11 @@ def kegg(gene):
             try:
                 client.perform()
             except PycurlError:
+                logging.critical("ERROR: KEGG: %s", pathway_id)
                 continue
 
             if client.getinfo(HTTP_CODE) != 200:
+                logging.critical("MALFORMED RESPONSE: KEGG: %s", pathway_id)
                 continue
 
             pathway_response = query_buffer.getvalue().split("\n")
@@ -106,7 +117,7 @@ def kegg(gene):
             pathways.add((unicode(gene, "utf-8"),
                           unicode("KEGG", "utf-8"),
                           unicode(pathway_id, "utf-8"),
-                          1,
+                          unicode("NA"),
                           unicode(pathway_name, "utf-8"),
                           unicode("".join([KEGG_ENTRY_URL, pathway_id]),
                                   "utf-8")))
@@ -115,7 +126,7 @@ def kegg(gene):
 
 
 def reactome(gene):
-    """Reactome"""
+    """Query Reactome for HGNC-Symbol"""
     query_buffer = StringIO()
     client = Curl()
     client.setopt(client.URL,
@@ -126,9 +137,11 @@ def reactome(gene):
     try:
         client.perform()
     except PycurlError:
+        logging.critical("ERROR: Reactome: %s", gene)
         return []
 
     if client.getinfo(HTTP_CODE) != 200:
+        logging.critical("MALFORMED RESPONSE: Reactome: %s", gene)
         return []
 
     try:
@@ -157,9 +170,11 @@ def reactome(gene):
             try:
                 client.perform()
             except PycurlError:
+                logging.critical("ERROR: Reactome: %s", gene_id)
                 continue
 
             if client.getinfo(HTTP_CODE) != 200:
+                logging.critical("MALFORMED RESPONSE: Reactome: %s", gene_id)
                 continue
 
             try:
@@ -174,7 +189,7 @@ def reactome(gene):
                     unicode(gene, "utf-8"),
                     unicode("Reactome", "utf-8"),
                     pathway["stId"],
-                    int(pathway["stIdVersion"].split(".")[1]),
+                    pathway["stIdVersion"].split(".")[1],
                     pathway["displayName"],
                     unicode("".join([REACTOME_ENTRY_URL,
                                      pathway["stId"].encode("utf-8")]),
@@ -183,7 +198,7 @@ def reactome(gene):
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
 def wikipathways(gene, exclude_reactome=True):
-    """WikiPathways"""
+    """Query WikiPathways for HGNC-Symbol"""
     wp_client = WikipathwaysApiClient()
     kwargs = {"query": gene,
               "organism": "http://identifiers.org/taxonomy/9606"
@@ -193,12 +208,13 @@ def wikipathways(gene, exclude_reactome=True):
         pathways = set((unicode(gene, "utf-8"),
                         unicode("WikiPathways", "utf-8"),
                         unicode(pathway["identifier"], "utf-8"),
-                        int(pathway["version"]),
+                        unicode(pathway["version"]),
                         unicode(pathway["name"], "utf-8"),
                         unicode(pathway["web_page"], "utf-8"))
-                    for pathway in wp_client.find_pathways_by_text(**kwargs))
+                       for pathway in wp_client.find_pathways_by_text(**kwargs))
 
     except ConnectionError:
+        logging.critical("ERROR: Wikipathways: %s", gene)
         sleep(300)
         wikipathways(gene)
 
@@ -223,13 +239,69 @@ def wikipathways(gene, exclude_reactome=True):
 
         response = query_buffer.getvalue()
         query_buffer.truncate(0)
-        if REACTOME_ENTRY_URL not in response:
+        if REACTOME_ORIGIN_SUFFIX not in response:
             unique_pathways.add(pathway)
 
     return sorted(list(unique_pathways), key=lambda pathway: pathway[2])
 
+def log_kegg_release():
+    """Write queried KEGG release information to log file"""
+    query_buffer = StringIO()
+    client = Curl()
+
+    client.setopt(client.URL, KEGG_INFO_URL)
+    client.setopt(client.WRITEDATA, query_buffer)
+
+    try:
+        client.perform()
+    except PycurlError:
+        logging.warning("\tKEGG release not retreived.")
+        return
+
+    if client.getinfo(HTTP_CODE) != 200:
+        logging.warning("\tKEGG release not retreived.")
+        return
+
+    release_response = query_buffer.getvalue().split("\n")
+    query_buffer.truncate(0)
+    release = release_response[1].replace("path", "").strip()
+    logging.info("KEGG version: %s", release)
+
+def log_reactome_release():
+    """Write queried Reactome release information to log file"""
+    query_buffer = StringIO()
+    client = Curl()
+
+    client.setopt(client.URL, REACTOME_INFO_URL)
+    client.setopt(client.WRITEDATA, query_buffer)
+
+    try:
+        client.perform()
+    except PycurlError:
+        logging.warning("\tReactome release not retreived.")
+        return
+
+    if client.getinfo(HTTP_CODE) != 200:
+        logging.warning("\tReactome release not retreived.")
+        return
+
+    release = query_buffer.getvalue()
+    query_buffer.truncate(0)
+    logging.info("Reactome version: %s", release)
+
+def log_wikipathways_release():
+    """Write generic WikiPathways release information to log file"""
+    logging.info("Wikipathways version: %s.%s", datetime.now().month,
+                 datetime.now().year)
+
 def build_pathway_db():
     """Build the pathway database"""
+    logging.info("Starting build: %s", PATHWAY_DB_FP)
+    logging.info("HGNC source: %s", GENE_ID_FP)
+    log_kegg_release()
+    log_reactome_release()
+    log_wikipathways_release()
+
     with open(GENE_ID_FP) as gene_file:
         genes = gene_file.read().splitlines()
 
@@ -244,36 +316,54 @@ def build_pathway_db():
     pathway_db = sqlite3.connect(PATHWAY_DB_FP)
     pathway_db_cursor = pathway_db.cursor()
     pathway_db_cursor.execute("""
+        DROP TABLE IF EXISTS genes
+        """)
+    pathway_db_cursor.execute("""
         DROP TABLE IF EXISTS pathways
         """)
     pathway_db_cursor.execute("""
-        CREATE TABLE pathways (
-            gene TEXT,
+        CREATE TABLE genes (
             database TEXT,
             pathway TEXT,
-            pathway_version INTEGER,
-            pathway_name TEXT,
-            pathway_url TEXT,
+            gene TEXT,
             PRIMARY KEY (
-                gene,
                 database,
-                pathway))
+                pathway,
+                gene)
+            ON CONFLICT IGNORE)
         """)
-
+    pathway_db_cursor.execute("""
+        CREATE TABLE pathways (
+            database TEXT,
+            pathway TEXT,
+            pathway_name TEXT,
+            PRIMARY KEY (
+                database,
+                pathway,
+                pathway_name)
+            ON CONFLICT IGNORE)
+        """)
     for i, gene in enumerate(genes):
         for database in (kegg, reactome, wikipathways):
             for pathway in database(gene):
                 pathway_db_cursor.execute("""
+                    INSERT INTO genes
+                    VALUES (?, ?, ?)
+                    """, (pathway[1], pathway[2], pathway[0]))
+
+                pathway_db_cursor.execute("""
                     INSERT INTO pathways
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """, pathway)
+                    VALUES (?, ?, ?)
+                    """, (pathway[1], pathway[2], pathway[4]))
+
                 tab_writer.writerow(pathway)
         gene_num_bar.update(i)
 
     pathway_db.commit()
     pathway_db.close()
-
     tab_file.close()
+    logging.info("Build complete: %s", PATHWAY_DB_FP)
+
 
 if __name__ == "__main__":
     PARSER = argparse.ArgumentParser(description="")
@@ -294,4 +384,14 @@ if __name__ == "__main__":
     PATHWAY_DB_TAB_FP = os.path.join(os.path.dirname(__file__),
                                      CONFIG.get("Defaults",
                                                 "PATHWAY_DB_TAB_FP"))
+    PATHWAY_DB_LOG_FP = os.path.join(os.path.dirname(__file__),
+                                     CONFIG.get("Defaults",
+                                                "PATHWAY_DB_LOG_FP"))
+
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.basicConfig(
+        filename=PATHWAY_DB_LOG_FP,
+        level=logging.INFO,
+        format="%(asctime)s\t%(levelname)s\t%(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S")
     build_pathway_db()
