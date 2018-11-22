@@ -1974,111 +1974,54 @@ def produce_pathway_summary(
         num_processes,
         p_value):
 
-    print("Computing expression standard deviations...")
-    genes_input = gene_exp.keys()
+    print("Computing standard deviations...")
+    genes = gene_exp.keys()
     current_process = psutil.Process()
     pool = multiprocessing.Pool(
             processes=min(num_processes, len(current_process.cpu_affinity())))
 
     gene_entries = pool.map(expression_distribution,
-                            [gene_exp[gene] for gene in genes_input])
-    for i, gene in enumerate(genes_input):
+                            [gene_exp[gene] for gene in genes])
+    for i, gene in enumerate(genes):
         gene_exp[gene] = gene_entries[i]
 
-    exp_dev = dict.fromkeys(genes_input, {})
+    exp_dev = dict.fromkeys(genes, {})
     exp_entries = pool.map(expression_variance,
-                            [gene_exp[gene] for gene in genes_input])
-    for i, gene in enumerate(genes_input):
+                            [gene_exp[gene] for gene in genes])
+    for i, gene in enumerate(genes):
         exp_dev[gene] = exp_entries[i]
 
     pool.close()
 
+    threshold = st.norm.ppf(1.0 - p_value/2)
+    for gene in exp_dev.keys():
+        exp_dev[gene] = {tissue: exp_dev[gene][tissue]
+                         for tissue in exp_dev[gene]
+                         if abs(exp_dev[gene][tissue]) >= threshold}
+        if not exp_dev[gene]:
+            del exp_dev[gene]
+
     print("Mapping genes to pathways...")
+    exp = {}
     pathway_db = sqlite3.connect(pathway_db_fp)
     pathway_db_cursor = pathway_db.cursor()
-    pathway_ids = pathway_db_cursor.execute("""
-        SELECT DISTINCT pathway
-        FROM genes
-        WHERE gene
-        IN (%s);
-        """ % ", ".join(["?" for i in range(len(genes_input))]), genes_input)
-    pathway_ids = [pathway_id for pathway_id in pathway_ids]
-
-    pathways = {}
-    for pathway_id in pathway_ids:
-        genes = pathway_db_cursor.execute("""
-            SELECT gene
-            FROM genes
-            WHERE pathway=?;
-            """, pathway_id)
-        genes = (gene[0].encode("utf-8") for gene in genes)
-        genes = frozenset(gene for gene in genes if gene in genes_input)
-
-        if len(genes) == 1:
-            continue
-
-        if genes not in pathways:
-            pathways[genes] = []
-        pathways[genes].append(pathway_id[0].encode("utf-8"))
-
-    tissues = []
     for gene in exp_dev:
-        tissues.extend(exp_dev[gene].keys())
-    tissues = list(dict.fromkeys(tissues))
+        pathways = [pathway[0].encode("utf-8") for pathway in
+                    pathway_db_cursor.execute("""
+                        SELECT pathway
+                        FROM genes
+                        WHERE gene=?
+                        """, (gene,))]
 
-    print("Assembling summary...")
-    summ_file = open(os.path.join(output_dir, "pathways.txt"), "w",
-                   buffering=buffer_size)
-    sig_file = open(os.path.join(output_dir, "pathways.significant.txt"), "w",
-                    buffering=buffer_size)
-    header = ["Pathways",
-              "Tissue",
-              "Genes",
-              "Gene_Expression_Deviation",
-              "Mean_Expression_Variance"]
-    summ_writer = csv.writer(summ_file, delimiter='\t')
-    sig_writer = csv.writer(sig_file, delimiter='\t')
-    summ_writer.writerow(header)
-    sig_writer.writerow(header)
+        for pathway in pathways:
+            if pathway not in exp:
+                exp[pathway] = {}
+            for tissue in exp_dev[gene]:
+                if tissue not in exp[pathway]:
+                    exp[pathway][tissue] = {}
+                exp[pathway][tissue][gene] = exp_dev[gene][tissue]
 
-    pathways_var = {}
-    threshold = st.norm.ppf(1.0 - p_value/2)
-    for genes in sorted(list(pathways), key=lambda genes: pathways[genes]):
-        for tissue in sorted(tissues):
-            exp_dev_pathway = []
-            for gene in genes:
-                try:
-                    exp_dev_pathway.append(exp_dev[gene][tissue])
-                except KeyError:
-                    break
-            if len(exp_dev_pathway) < len(genes):
-                continue
-
-            line = []
-            line.append(", ".join(sorted(pathways[genes])))
-            line.append(tissue)
-            line.append(", ".join(genes))
-
-            line.append(", ".join([str(x) for x in exp_dev_pathway]))
-
-            mean_var = sum([abs(x) for x in exp_dev_pathway])/len(genes)
-            line.append(str(mean_var))
-
-            summ_writer.writerow(line)
-            if mean_var >= threshold:
-                sig_writer.writerow(line)
-                pathway_set = frozenset(pathways[genes])
-                if pathway_set not in pathways_var:
-                    pathways_var[pathway_set] = {}
-                if tissue not in pathways_var[pathway_set]:
-                    pathways_var[pathway_set][tissue] = dict.fromkeys(genes)
-                    for gene in genes:
-                        pathways_var[pathway_set][tissue][gene] =\
-                            exp_dev[gene][tissue]
-
-    print(pathways_var)
-
-
+    print(exp)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="")
