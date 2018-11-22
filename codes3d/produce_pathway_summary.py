@@ -36,9 +36,9 @@ if __name__ == "__main__":
             help="The number of processes for compilation of the results " +\
             "(default: %s)." % str(min(psutil.cpu_count(), 32)))
     parser.add_argument("-e", "--significant_expression", type=float,
-                        default=0.05,
-                        help="P-value of significant expression variation "+\
-                        "(default: 0.05).")
+            default=0.05,
+            help="P-value of significant expression variation "+\
+            "(default: 0.05).")
 
     args = parser.parse_args()
     config = configparser.ConfigParser()
@@ -46,7 +46,7 @@ if __name__ == "__main__":
     pathway_db_fp = os.path.join(os.path.dirname(__file__),
                                  config.get("Defaults", "PATHWAY_DB_FP"))
     if not os.path.isdir(args.output_dir):
-	    print('\tCreating output directory..')
+	    print('\tCreating output directory...')
 	    os.mkdir(args.output_dir)
     gene_exp = codes3d.parse_summary_file(args.summary_file,
                                           args.buffer_size_in)
