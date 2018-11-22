@@ -2,3 +2,5 @@
 	path = wikipathways-api-client-py
 	url = https://github.com/lucasfein/wikipathways-api-client-py
 	branch = master
+[submodule "/wikipathways-api-client-py"]
+	branch = master
