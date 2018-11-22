@@ -9,6 +9,7 @@ import configparser
 import csv
 import json
 import multiprocessing
+import math
 import operator
 import os
 import sys
@@ -32,6 +33,7 @@ from matplotlib import pyplot as plt
 from matplotlib import style
 from matplotlib.ticker import FuncFormatter
 import rpy2.robjects as R
+import scipy.stats as st
 
 def parse_parameters(restriction_enzymes, include_cell_line, exclude_cell_line):
     """Validate user parameters -r, -n and -x.
@@ -813,7 +815,7 @@ def get_expression(gene_tissue_tuple):
     try:
         expression = list(GENE_DF.at[gene_tissue_tuple[0],
                                      gene_tissue_tuple[1]])
-        return (expression, max(expression))
+        return (expression, sum(expression)/len(expression))
     except TypeError:
         expression = list([GENE_DF.at[gene_tissue_tuple[0],
                                       gene_tissue_tuple[1]]])
@@ -1042,8 +1044,8 @@ def produce_summary(
     snps_genes = [(snp, gene) for snp in all_snps for gene in all_genes]
 
     current_process = psutil.Process()
-    pool = multiprocessing.Pool(processes=min(num_processes,
-                                          len(current_process.cpu_affinity())))
+    pool = multiprocessing.Pool(
+            processes=min(num_processes, len(current_process.cpu_affinity())))
 
     print("Collecting gene expression rates...")
     expression = pool.map(get_expression, genes_tissues)
@@ -1071,6 +1073,8 @@ def produce_summary(
     hic_dict = {}
     for i in range(len(snps_genes)):
         hic_dict[snps_genes[i]] = hic_data[i]
+
+    pool.close()
 
     print("Writing to summary files...")
     for line in to_file:
@@ -1904,7 +1908,9 @@ def parse_summary_file(
         summary_file,
         buffer_size):
 
+    print("Parsing input file...")
     gene_exp = {}
+    snps = {}
     with open(summary_file, buffering=buffer_size) as summary:
         next(summary)
         for line in summary:
@@ -1917,31 +1923,162 @@ def parse_summary_file(
                 try:
                     gene_exp[gene]['max_rate'] = float(line[19])
                 except ValueError:
-                    gene_exp[gene]['max_rate'] = line[19]
+                    gene_exp[gene]['max_rate'] = "NA"
                 gene_exp[gene]['min_tissue'] = line[20]
                 try:
                     gene_exp[gene]['min_rate'] = float(line[21])
                 except ValueError:
-                    gene_exp[gene]['min_rate'] = line[21]
+                    gene_exp[gene]['min_rate'] = "NA"
 
             tissue = line[7]
             if tissue not in gene_exp[gene]:
                 try:
                     gene_exp[gene][tissue] = float(line[17])
                 except ValueError:
-                    gene_exp[gene][tissue] = line[17]
+                    gene_exp[gene][tissue] = "NA"
 
     return gene_exp
 
+def expression_distribution(expr):
+    expr = {tissue: expr[tissue] for tissue in expr
+            if tissue not in (
+                "max_rate", "max_tissue", "min_rate", "min_tissue")
+            and expr[tissue] != "NA"}
+
+    mean = sum([expr[tissue] for tissue in expr])/len(expr)
+
+    try:
+        expr["sdv"] =\
+            math.sqrt(sum([(expr[tissue] - mean)**2 for tissue in expr])/\
+                      (len(expr)-1))
+    except ZeroDivisionError:
+        expr["sdv"] = 0.0
+    expr["mean"] = mean
+
+    return expr
+
+def expression_variance(expr):
+    mean = expr.pop("mean")
+    sdv = expr.pop("sdv")
+
+    try:
+        return {tissue: (expr[tissue] -  mean)/sdv for tissue in expr}
+    except ZeroDivisionError:
+        return {tissue: 0.0 for tissue in expr}
 
 def produce_pathway_summary(
         gene_exp,
         pathway_db_fp,
         output_dir,
         buffer_size,
-        num_proc):
+        num_processes,
+        p_value):
 
-    print(gene_exp)
+    print("Computing expression standard deviations...")
+    genes_input = gene_exp.keys()
+    current_process = psutil.Process()
+    pool = multiprocessing.Pool(
+            processes=min(num_processes, len(current_process.cpu_affinity())))
+
+    gene_entries = pool.map(expression_distribution,
+                            [gene_exp[gene] for gene in genes_input])
+    for i, gene in enumerate(genes_input):
+        gene_exp[gene] = gene_entries[i]
+
+    exp_dev = dict.fromkeys(genes_input, {})
+    exp_entries = pool.map(expression_variance,
+                            [gene_exp[gene] for gene in genes_input])
+    for i, gene in enumerate(genes_input):
+        exp_dev[gene] = exp_entries[i]
+
+    pool.close()
+
+    print("Mapping genes to pathways...")
+    pathway_db = sqlite3.connect(pathway_db_fp)
+    pathway_db_cursor = pathway_db.cursor()
+    pathway_ids = pathway_db_cursor.execute("""
+        SELECT DISTINCT pathway
+        FROM genes
+        WHERE gene
+        IN (%s);
+        """ % ", ".join(["?" for i in range(len(genes_input))]), genes_input)
+    pathway_ids = [pathway_id for pathway_id in pathway_ids]
+
+    pathways = {}
+    for pathway_id in pathway_ids:
+        genes = pathway_db_cursor.execute("""
+            SELECT gene
+            FROM genes
+            WHERE pathway=?;
+            """, pathway_id)
+        genes = (gene[0].encode("utf-8") for gene in genes)
+        genes = frozenset(gene for gene in genes if gene in genes_input)
+
+        if len(genes) == 1:
+            continue
+
+        if genes not in pathways:
+            pathways[genes] = []
+        pathways[genes].append(pathway_id[0].encode("utf-8"))
+
+    tissues = []
+    for gene in exp_dev:
+        tissues.extend(exp_dev[gene].keys())
+    tissues = list(dict.fromkeys(tissues))
+
+    print("Assembling summary...")
+    summ_file = open(os.path.join(output_dir, "pathways.txt"), "w",
+                   buffering=buffer_size)
+    sig_file = open(os.path.join(output_dir, "pathways.significant.txt"), "w",
+                    buffering=buffer_size)
+    header = ["Pathways",
+              "Tissue",
+              "Genes",
+              "Gene_Expression_Deviation",
+              "Mean_Expression_Variance"]
+    summ_writer = csv.writer(summ_file, delimiter='\t')
+    sig_writer = csv.writer(sig_file, delimiter='\t')
+    summ_writer.writerow(header)
+    sig_writer.writerow(header)
+
+    pathways_var = {}
+    threshold = st.norm.ppf(1.0 - p_value/2)
+    for genes in sorted(list(pathways), key=lambda genes: pathways[genes]):
+        for tissue in sorted(tissues):
+            exp_dev_pathway = []
+            for gene in genes:
+                try:
+                    exp_dev_pathway.append(exp_dev[gene][tissue])
+                except KeyError:
+                    break
+            if len(exp_dev_pathway) < len(genes):
+                continue
+
+            line = []
+            line.append(", ".join(sorted(pathways[genes])))
+            line.append(tissue)
+            line.append(", ".join(genes))
+
+            line.append(", ".join([str(x) for x in exp_dev_pathway]))
+
+            mean_var = sum([abs(x) for x in exp_dev_pathway])/len(genes)
+            line.append(str(mean_var))
+
+            summ_writer.writerow(line)
+            if mean_var >= threshold:
+                sig_writer.writerow(line)
+                pathway_set = frozenset(pathways[genes])
+                if pathway_set not in pathways_var:
+                    pathways_var[pathway_set] = {}
+                if tissue not in pathways_var[pathway_set]:
+                    pathways_var[pathway_set][tissue] = dict.fromkeys(genes)
+                    for gene in genes:
+                        pathways_var[pathway_set][tissue][gene] =\
+                            exp_dev[gene][tissue]
+
+    print(pathways_var)
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="")
@@ -1955,7 +2092,7 @@ if __name__ == "__main__":
                         "hiCquery run (default: conf.py)")
     parser.add_argument("-n", "--include_cell_lines", nargs='+',
                         help="Space-separated list of cell lines to include " +\
-                        "(others will be ignored). NOTE: Mutually exclusive " +\
+                    "(others will be ignored). NOTE: Mutually exclusive " +\
                         "with EXCLUDE_CELL_LINES.")
     parser.add_argument("-x", "--exclude_cell_lines", nargs='+',
                         help="Space-separated list of cell lines to exclude " +\
@@ -1992,6 +2129,10 @@ if __name__ == "__main__":
                         help="The number of processes for compilation of " +\
                         "results (default: %s)." %
                         str(min(psutil.cpu_count(), 32)))
+    parser.add_argument("-e", "--significant_expression", type=float,
+                        default=0.05,
+                        help="P-value of significant expression variation "+\
+                        "(default: 0.05).")
     args = parser.parse_args()
     config = configparser.ConfigParser()
     config.read(args.config)
@@ -2048,4 +2189,5 @@ if __name__ == "__main__":
          args.fdr_threshold, args.output_dir, args.buffer_size_in,
          args.buffer_size_out, args.num_processes_summary)
     produce_pathway_summary(gene_exp, pathway_db_fp, args.output_dir,
-         args.buffer_size_out, args.num_processes_summary)
+         args.buffer_size_out, args.num_processes_summary,
+         args.significant_expression)
