@@ -10,23 +10,22 @@ from json import loads as json
 import logging
 import sqlite3
 import argparse
-from datetime import datetime
 import unicodecsv as csv
 from pycurl import Curl
 from pycurl import error as PycurlError
 from pycurl import HTTP_CODE
 from requests.exceptions import ConnectionError
+from lxml.etree import XMLSyntaxError
 import configparser
 import progressbar
 from wikipathways_api_client import WikipathwaysApiClient
 
 KEGG_API_URL = "http://rest.kegg.jp"
 KEGG_INFO_URL = "http://rest.kegg.jp/info/pathway"
-KEGG_ENTRY_URL = "https://www.genome.jp/dbget-bin/www_bget?"
 REACTOME_API_URL = "https://www.reactome.org/ContentService"
 REACTOME_INFO_URL = "https://reactome.org/ContentService/data/database/version"
-REACTOME_ENTRY_URL = "https://www.reactome.org/PathwayBrowser/#DIAGRAM="
 REACTOME_ORIGIN_SUFFIX = "reactome.org/PathwayBrowser/#DIAGRAM="
+WIKIPATHWAYS_ENTRY_URL = "https://www.wikipathways.org/index.php/Pathway:"
 
 def kegg(gene):
     """Query Kyoto Encyclopedia of Genes and Genomes for HGNC-Symbol"""
@@ -39,7 +38,6 @@ def kegg(gene):
     try:
         client.perform()
     except PycurlError:
-        logging.critical("ERROR: KEGG: %s", gene)
         return []
 
     if client.getinfo(HTTP_CODE) != 200:
@@ -71,7 +69,6 @@ def kegg(gene):
         try:
             client.perform()
         except PycurlError:
-            logging.critical("ERROR: KEGG: %s", gene_id)
             continue
 
         if client.getinfo(HTTP_CODE) != 200:
@@ -92,7 +89,6 @@ def kegg(gene):
             try:
                 client.perform()
             except PycurlError:
-                logging.critical("ERROR: KEGG: %s", pathway_id)
                 continue
 
             if client.getinfo(HTTP_CODE) != 200:
@@ -115,9 +111,7 @@ def kegg(gene):
                           unicode("KEGG", "utf-8"),
                           unicode(pathway_id, "utf-8"),
                           unicode("NA"),
-                          unicode(pathway_name, "utf-8"),
-                          unicode("".join([KEGG_ENTRY_URL, pathway_id]),
-                                  "utf-8")))
+                          unicode(pathway_name, "utf-8")))
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
@@ -134,7 +128,6 @@ def reactome(gene):
     try:
         client.perform()
     except PycurlError:
-        logging.critical("ERROR: Reactome: %s", gene)
         return []
 
     if client.getinfo(HTTP_CODE) != 200:
@@ -166,7 +159,6 @@ def reactome(gene):
             try:
                 client.perform()
             except PycurlError:
-                logging.critical("ERROR: Reactome: %s", gene_id)
                 continue
 
             if client.getinfo(HTTP_CODE) != 200:
@@ -185,10 +177,7 @@ def reactome(gene):
                     unicode("Reactome", "utf-8"),
                     pathway["stId"],
                     pathway["stIdVersion"].split(".")[1],
-                    pathway["displayName"],
-                    unicode("".join([REACTOME_ENTRY_URL,
-                                     pathway["stId"].encode("utf-8")]),
-                            "utf-8")))
+                    pathway["displayName"]))
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
@@ -204,12 +193,12 @@ def wikipathways(gene, exclude_reactome=True):
                         unicode("WikiPathways", "utf-8"),
                         unicode(pathway["identifier"], "utf-8"),
                         unicode(pathway["version"]),
-                        unicode(pathway["name"], "utf-8"),
-                        unicode(pathway["web_page"], "utf-8"))
+                        unicode(pathway["name"], "utf-8"))
                        for pathway in wp_client.find_pathways_by_text(**kwargs))
 
+    except XMLSyntaxError:
+        return []
     except ConnectionError:
-        logging.critical("ERROR: WikiPathways: %s", gene)
         sleep(600)
         return wikipathways(gene)
 
@@ -221,7 +210,7 @@ def wikipathways(gene, exclude_reactome=True):
 
     unique_pathways = set()
     for pathway in pathways:
-        client.setopt(client.URL, pathway[5])
+        client.setopt(client.URL, WIKIPATHWAYS_ENTRY_URL + pathway[2])
         client.setopt(client.WRITEDATA, query_buffer)
 
         try:

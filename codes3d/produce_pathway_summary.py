@@ -35,6 +35,11 @@ if __name__ == "__main__":
             default=min(psutil.cpu_count(), 32),
             help="The number of processes for compilation of the results " +\
             "(default: %s)." % str(min(psutil.cpu_count(), 32)))
+    parser.add_argument("-e", "--significant_expression", type=float,
+                        default=0.05,
+                        help="P-value of significant expression variation "+\
+                        "(default: 0.05).")
+
     args = parser.parse_args()
     config = configparser.ConfigParser()
     config.read(args.config)
@@ -44,7 +49,9 @@ if __name__ == "__main__":
 	    print('\tCreating output directory..')
 	    os.mkdir(args.output_dir)
     gene_exp = codes3d.parse_summary_file(args.summary_file,
-        args.buffer_size_in)
+                                          args.buffer_size_in)
     codes3d.produce_pathway_summary(gene_exp, pathway_db_fp, args.output_dir,
-            args.buffer_size_out, args.num_processes_summary)
+                                    args.buffer_size_out,
+                                    args.num_processes_summary,
+                                    args.significant_expression)
 
