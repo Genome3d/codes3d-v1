@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
 from itertools import cycle
-import wikipathways_api_client
 import argparse
 import ast
 import bisect
@@ -815,7 +814,7 @@ def get_expression(gene_tissue_tuple):
     try:
         expression = list(GENE_DF.at[gene_tissue_tuple[0],
                                      gene_tissue_tuple[1]])
-        return (expression, sum(expression)/len(expression))
+        return (expression, max(expression))
     except TypeError:
         expression = list([GENE_DF.at[gene_tissue_tuple[0],
                                       gene_tissue_tuple[1]]])
@@ -1909,14 +1908,15 @@ def parse_summary_file(
         buffer_size):
 
     print("Parsing input file...")
+    snps_to_genes = {}
     gene_exp = {}
-    snps = {}
     with open(summary_file, buffering=buffer_size) as summary:
         next(summary)
         for line in summary:
             line = line.split("\t")
-
             gene = line[3]
+            tissue = line[7]
+
             if gene not in gene_exp:
                 gene_exp[gene] = {}
                 gene_exp[gene]['max_tissue'] = line[18]
@@ -1930,7 +1930,6 @@ def parse_summary_file(
                 except ValueError:
                     gene_exp[gene]['min_rate'] = "NA"
 
-            tissue = line[7]
             if tissue not in gene_exp[gene]:
                 try:
                     gene_exp[gene][tissue] = float(line[17])
@@ -1974,7 +1973,7 @@ def produce_pathway_summary(
         num_processes,
         p_value):
 
-    print("Computing standard deviations...")
+    print("Computing Z-Score...")
     genes = gene_exp.keys()
     current_process = psutil.Process()
     pool = multiprocessing.Pool(
@@ -1987,41 +1986,48 @@ def produce_pathway_summary(
 
     exp_dev = dict.fromkeys(genes, {})
     exp_entries = pool.map(expression_variance,
-                            [gene_exp[gene] for gene in genes])
+                           [gene_exp[gene] for gene in genes])
     for i, gene in enumerate(genes):
         exp_dev[gene] = exp_entries[i]
 
     pool.close()
 
-    threshold = st.norm.ppf(1.0 - p_value/2)
-    for gene in exp_dev.keys():
-        exp_dev[gene] = {tissue: exp_dev[gene][tissue]
-                         for tissue in exp_dev[gene]
-                         if abs(exp_dev[gene][tissue]) >= threshold}
-        if not exp_dev[gene]:
-            del exp_dev[gene]
-
     print("Mapping genes to pathways...")
-    exp = {}
+    pathways = {}
     pathway_db = sqlite3.connect(pathway_db_fp)
     pathway_db_cursor = pathway_db.cursor()
     for gene in exp_dev:
-        pathways = [pathway[0].encode("utf-8") for pathway in
-                    pathway_db_cursor.execute("""
-                        SELECT pathway
-                        FROM genes
-                        WHERE gene=?
-                        """, (gene,))]
-
-        for pathway in pathways:
-            if pathway not in exp:
-                exp[pathway] = {}
+        pathway_of_gene = [pathway[0].encode("utf-8") for pathway in
+                           pathway_db_cursor.execute("""
+                               SELECT pathway
+                               FROM genes
+                               WHERE gene=?
+                               """, (gene,))]
+        for pathway in pathway_of_gene:
+            if pathway not in pathways:
+                pathways[pathway] = {}
             for tissue in exp_dev[gene]:
-                if tissue not in exp[pathway]:
-                    exp[pathway][tissue] = {}
-                exp[pathway][tissue][gene] = exp_dev[gene][tissue]
+                if tissue not in pathways[pathway]:
+                    pathways[pathway][tissue] = {}
+                pathways[pathway][tissue][gene] = exp_dev[gene][tissue]
 
-    print(exp)
+    pathway_db.close()
+
+    print("Filtering for significant scores...")
+    threshold = st.norm.ppf(1 - 0.5*p_value)
+    for pathway in pathways.keys():
+        for tissue in pathways[pathway].keys():
+            pathways[pathway][tissue] = {
+                gene: pathways[pathway][tissue][gene]
+                for gene in pathways[pathway][tissue]
+                if pathways[pathway][tissue][gene] >= threshold}
+            if not pathways[pathway][tissue]:
+                del pathways[pathway][tissue]
+        if not pathways[pathway]:
+            del pathways[pathway]
+
+    print(pathways)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="")
@@ -2043,7 +2049,7 @@ if __name__ == "__main__":
                         "with INCLUDE_CELL_LINES.")
     parser.add_argument("-o", "--output_dir", default="codes3d_output",
                         help="The directory in which to output results " +\
-                        "(\"hiCquery_output\" by default).")
+                        "(\"codes3d_output\" by default).")
     parser.add_argument("-l", "--local_databases_only", action="store_true",
                         default=False, help="Consider only local databases. " +\
                         "Will only include cis-eQTLs if using downloadable " +\

@@ -50,7 +50,8 @@ if __name__ == "__main__":
 	    os.mkdir(args.output_dir)
     gene_exp = codes3d.parse_summary_file(args.summary_file,
                                           args.buffer_size_in)
-    codes3d.produce_pathway_summary(gene_exp, pathway_db_fp, args.output_dir,
+    codes3d.produce_pathway_summary(gene_exp,
+                                    pathway_db_fp, args.output_dir,
                                     args.buffer_size_out,
                                     args.num_processes_summary,
                                     args.significant_expression)
