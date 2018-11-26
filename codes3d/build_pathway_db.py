@@ -279,7 +279,7 @@ def log_wikipathways_release():
 
 def build_pathway_db():
     """Build the pathway database"""
-    logging.info("Starting build: %s", PATHWAY_DB_FP)
+    logging.info("Starting build: %s", PATHWAY_DB_TMP_FP)
     logging.info("HGNC source: %s", GENE_ID_FP)
     log_kegg_release()
     log_reactome_release()
@@ -296,7 +296,7 @@ def build_pathway_db():
     tab_file = open(PATHWAY_DB_TAB_FP, "w")
     tab_writer = csv.writer(tab_file, delimiter="\t")
 
-    pathway_db = sqlite3.connect(PATHWAY_DB_FP)
+    pathway_db = sqlite3.connect(PATHWAY_DB_TMP_FP)
     pathway_db_cursor = pathway_db.cursor()
     pathway_db_cursor.execute("""
         DROP TABLE IF EXISTS genes
@@ -345,6 +345,8 @@ def build_pathway_db():
     pathway_db.commit()
     pathway_db.close()
     tab_file.close()
+
+    os.rename(PATHWAY_DB_TMP_FP, PATHWAY_DB_FP)
     logging.info("Build complete: %s", PATHWAY_DB_FP)
 
 
@@ -364,6 +366,8 @@ if __name__ == "__main__":
                               CONFIG.get("Defaults", "GENE_ID_FP"))
     PATHWAY_DB_FP = os.path.join(os.path.dirname(__file__),
                                  CONFIG.get("Defaults", "PATHWAY_DB_FP"))
+    PATHWAY_DB_TMP_FP = os.path.join(os.path.dirname(__file__),
+                                 CONFIG.get("Defaults", "PATHWAY_DB_TMP_FP"))
     PATHWAY_DB_TAB_FP = os.path.join(os.path.dirname(__file__),
                                      CONFIG.get("Defaults",
                                                 "PATHWAY_DB_TAB_FP"))
