@@ -95,7 +95,7 @@ def kegg(gene):
             for entry in pathway_entries:
                 if entry.startswith("NAME"):
                     pathway_name =\
-                            entry.replace("NAME", "").split("-")[0].strip()
+                            entry.replace("NAME", "").split(" - ")[0].strip()
                     break
                 pathway_name = "NA"
 
@@ -309,38 +309,8 @@ def log_reactome_release():
 
 def build_pathway_db():
     """Build pathway database"""
-    parser = argparse.ArgumentParser(description="")
-    parser.add_argument("-c", "--config",
-                        default=os.path.join(os.path.dirname(__file__),
-                                             "../docs/codes3d.conf"),
-                        help="The configuration file to be used.")
-
-    args = parser.parse_args()
-
-    config = configparser.ConfigParser()
-    config.read(args.config)
-
-    gene_id_fp = os.path.join(os.path.dirname(__file__),
-                              config.get("Defaults", "gene_id_fp"))
-    pathway_db_fp = os.path.join(os.path.dirname(__file__),
-                                 config.get("Defaults", "pathway_db_fp"))
-    pathway_db_tmp_fp = os.path.join(os.path.dirname(__file__),
-                                     config.get("Defaults",
-                                                "pathway_db_tmp_fp"))
-    pathway_db_tab_fp = os.path.join(os.path.dirname(__file__),
-                                     config.get("Defaults",
-                                                "pathway_db_tab_fp"))
-    pathway_db_log_fp = os.path.join(os.path.dirname(__file__),
-                                     config.get("Defaults",
-                                                "pathway_db_log_fp"))
-
-    logging.getLogger("requests").setLevel(logging.WARNING)
-    logging.basicConfig(
-        filename=pathway_db_log_fp,
-        level=logging.INFO,
-        format="%(asctime)s\t%(levelname)s\t%(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S")
-
+    gene_id_fp, pathway_db_fp, pathway_db_tmp_fp, pathway_db_tab_fp =\
+        build_pathway_db_setup()
     logging.info("Build started.")
     logging.info("File name during build: %s", pathway_db_tmp_fp)
     logging.info("HGNC source: %s", gene_id_fp)
@@ -459,6 +429,42 @@ def build_pathway_db():
     os.rename(pathway_db_tmp_fp, pathway_db_fp)
     logging.info("Renamed %s to %s.", pathway_db_tmp_fp, pathway_db_fp)
     logging.info("Build completed.")
+
+def build_pathway_db_setup():
+    """Parse config file and set up logging"""
+    parser = argparse.ArgumentParser(description="")
+    parser.add_argument("-c", "--config",
+                        default=os.path.join(os.path.dirname(__file__),
+                                             "../docs/codes3d.conf"),
+                        help="The configuration file to be used.")
+
+    args = parser.parse_args()
+
+    config = configparser.ConfigParser()
+    config.read(args.config)
+
+    gene_id_fp = os.path.join(os.path.dirname(__file__),
+                              config.get("Defaults", "gene_id_fp"))
+    pathway_db_fp = os.path.join(os.path.dirname(__file__),
+                                 config.get("Defaults", "pathway_db_fp"))
+    pathway_db_tmp_fp = os.path.join(os.path.dirname(__file__),
+                                     config.get("Defaults",
+                                                "pathway_db_tmp_fp"))
+    pathway_db_tab_fp = os.path.join(os.path.dirname(__file__),
+                                     config.get("Defaults",
+                                                "pathway_db_tab_fp"))
+    pathway_db_log_fp = os.path.join(os.path.dirname(__file__),
+                                     config.get("Defaults",
+                                                "pathway_db_log_fp"))
+
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.basicConfig(
+        filename=pathway_db_log_fp,
+        level=logging.INFO,
+        format="%(asctime)s\t%(levelname)s\t%(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S")
+
+    return gene_id_fp, pathway_db_fp, pathway_db_tmp_fp, pathway_db_tab_fp
 
 
 if __name__ == "__main__":
