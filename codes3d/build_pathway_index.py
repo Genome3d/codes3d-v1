@@ -1,55 +1,65 @@
 #!/usr/bin/env python
 
-"""APIs to query HGNC-Gene Symbols in KEGG, Reactome and WikiPathways"""
+"""Clients to query HGNC-Gene-IDs in KEGG, Reactome and WikiPathways"""
 
 from __future__ import print_function
 import os
-from time import sleep
-from StringIO import StringIO
-from json import loads as json
 import logging
 import sqlite3
 import argparse
-import unicodecsv as csv
-from pycurl import Curl
-from pycurl import error as PycurlError
-from pycurl import HTTP_CODE
+import xml.etree.ElementTree
+import time
+import unicodecsv
 import configparser
 import progressbar
-import xml.etree.ElementTree as ET
+import requests
 
-KEGG_API_URL = "http://rest.kegg.jp"
-KEGG_INFO_URL = "http://rest.kegg.jp/info/pathway"
-REACTOME_API_URL = "https://www.reactome.org/ContentService"
-REACTOME_INFO_URL = "https://reactome.org/ContentService/data/database/version"
-REACTOME_ORIGIN_SUFFIX = "reactome.org/PathwayBrowser/#DIAGRAM="
-WIKIPATHWAYS_API_URL = "https://webservice.wikipathways.org"
-WIKIPATHWAYS_ENTRY_URL = "https://www.wikipathways.org/index.php/Pathway:"
-WIKIPATHWAYS_NAMESPACES = {"ns1": "http://www.wso2.org/php/xsd",
-                           "ns2": "http://www.wikipathways.org/webservice"}
+def query(url):
+    """Send request to specified URL"""
+    while True:
+        try:
+            response = requests.get(url)
+            break
+        except requests.exceptions.HTTPError:
+            logging.critical("Unsucessful status code %s: %s",
+                             response.status_code, url)
+            return None
+        except requests.exceptions.ConnectionError:
+            logging.critical("Connection failure: %s", url)
+            time.sleep(60)
+            continue
+        except requests.exceptions.RequestException:
+            logging.critical("General Error: %s", url)
+            return None
+
+    if response.headers["content-type"].split(";")[0] == "application/json":
+        try:
+            content = response.json()
+        except ValueError:
+            logging.critical("Invalid JSON content: %s", url)
+            content = None
+        return content
+
+    elif response.headers["content-type"].split(";")[0] == "application/xml":
+        try:
+            content = xml.etree.ElementTree.fromstring(response.text)
+        except xml.etree.ElementTree.ParseError:
+            logging.critical("Invalid XML content: %s", url)
+            content = None
+        return content
+
+    return response.text
 
 def kegg(gene):
-    """Query Kyoto Encyclopedia of Genes and Genomes for HGNC-Symbol"""
-    query_buffer = StringIO()
-    client = Curl()
+    """Query Kyoto Encyclopedia of Genes and Genomes for HGNC-Gene-ID"""
+    kegg_api_url = "http://rest.kegg.jp"
 
-    client.setopt(client.URL, "%s/find/genes/%s" % (KEGG_API_URL, gene))
-    client.setopt(client.WRITEDATA, query_buffer)
+    gene_response = query("{}/find/genes/{}".format(kegg_api_url, gene))
 
-    try:
-        client.perform()
-    except PycurlError:
+    if not gene_response:
         return []
 
-    if client.getinfo(HTTP_CODE) != 200:
-        return []
-
-    gene_response = query_buffer.getvalue().split("\n")
-    query_buffer.truncate(0)
-    gene_entries = [entry for entry in gene_response if entry]
-
-    if not gene_entries:
-        return []
+    gene_entries = gene_response.split("\n")[:-1]
 
     gene_ids = set()
     for entry in gene_entries:
@@ -63,321 +73,305 @@ def kegg(gene):
 
     pathways = set()
     for gene_id in gene_ids:
-        client.setopt(client.URL, "%s/link/pathway/%s"
-                      % (KEGG_API_URL, gene_id))
-        client.setopt(client.WRITEDATA, query_buffer)
+        pathway_response = query("{}/link/pathway/{}".format(
+            kegg_api_url, gene_id))
 
-        try:
-            client.perform()
-        except PycurlError:
+        if not pathway_response:
             continue
 
-        if client.getinfo(HTTP_CODE) != 200:
-            continue
-
-        pathway_response = query_buffer.getvalue().split("\n")
-        query_buffer.truncate(0)
-        pathway_ids = [entry.split("\t")[1] for entry
-                       in pathway_response if entry]
-
-        if not pathway_ids:
-            continue
+        pathway_entries = pathway_response.split("\n")[:-1]
+        pathway_ids = [entry.split("\t")[1] for entry in pathway_entries]
 
         for pathway_id in pathway_ids:
-            client.setopt(client.URL, "%s/get/%s" % (KEGG_API_URL, pathway_id))
-            client.setopt(client.WRITEDATA, query_buffer)
+            pathway_response = query("{}/get/{}".format(
+                kegg_api_url, pathway_id))
 
-            try:
-                client.perform()
-            except PycurlError:
+            if not pathway_response:
                 continue
 
-            if client.getinfo(HTTP_CODE) != 200:
-                continue
+            pathway_entries = pathway_response.split("\n")
+            pathway_id = pathway_id.replace("path:", "")
 
-            pathway_response = query_buffer.getvalue().split("\n")
-            query_buffer.truncate(0)
-
-            for entry in pathway_response:
+            for entry in pathway_entries:
                 if entry.startswith("NAME"):
-                    pathway_name = entry.replace("NAME", "")
+                    pathway_name =\
+                            entry.replace("NAME", "").split("-")[0].strip()
                     break
                 pathway_name = "NA"
 
-            pathway_id = pathway_id.replace("path:", "")
-            pathway_name = pathway_name.split("-")[0]
-
             pathways.add((unicode(gene, "utf-8"),
                           unicode("KEGG", "utf-8"),
-                          unicode(pathway_id, "utf-8"),
+                          pathway_id,
                           unicode("NA"),
-                          unicode(pathway_name, "utf-8")))
+                          pathway_name))
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
 
 def reactome(gene):
-    """Query Reactome for HGNC-Symbol"""
-    query_buffer = StringIO()
-    client = Curl()
-    client.setopt(client.URL,
-                  "%s/search/query?query=%s&cluster=true"
-                  % (REACTOME_API_URL, gene))
-    client.setopt(client.WRITEDATA, query_buffer)
+    """Query Reactome for HGNC-Gene-ID"""
+    reactome_api_url = "https://www.reactome.org/ContentService"
 
-    try:
-        client.perform()
-    except PycurlError:
+    response = query(
+        "{}/search/query?query={}&species=Homo%%20sapiens&cluster=true".format(
+            reactome_api_url, gene))
+
+    if not response:
         return []
 
-    if client.getinfo(HTTP_CODE) != 200:
-        return []
+    pathway_ids = set()
 
-    try:
-        gene_response = json(query_buffer.getvalue())
-    except ValueError:
-        query_buffer.truncate(0)
-        return []
-    query_buffer.truncate(0)
-
-    gene_ids = set()
-    for result in gene_response["results"]:
-        if result["typeName"] == "Protein":
+    for result in response["results"]:
+        if result["typeName"] == "Pathway":
             for entry in result["entries"]:
-                if "Homo sapiens" in entry["species"]:
-                    gene_ids.add(entry["stId"])
+                pathway_ids.add(entry["stId"])
 
-    pathways = set()
-    for gene_id in gene_ids:
-        for url_variant in ("", "diagram/"):
-            client.setopt(
-                client.URL,
-                "%s/data/pathways/low/%sentity/%s/allForms?species=9606"
-                % (REACTOME_API_URL, url_variant, gene_id))
-            client.setopt(client.WRITEDATA, query_buffer)
+    pathways = dict.fromkeys(pathway_ids)
 
-            try:
-                client.perform()
-            except PycurlError:
-                continue
+    for pathway_id in pathway_ids:
+        response = query("{}/data/query/{}".format(
+            reactome_api_url, pathway_id))
 
-            if client.getinfo(HTTP_CODE) != 200:
-                continue
+        if not response:
+            del pathways[pathway_id]
+            continue
 
-            try:
-                pathway_response = json(query_buffer.getvalue())
-            except ValueError:
-                return []
+        pathways[pathway_id] = {}
+        pathways[pathway_id]["name"] = response["displayName"]
+        pathways[pathway_id]["version"] = response["stIdVersion"].split(".")[1]
 
-            query_buffer.truncate(0)
+    reactions_to_pathways = dict.fromkeys(pathways, set())
+    reaction_ids = set()
+    for pathway_id in reactions_to_pathways:
+        response = query("{}/data/pathway/{}/containedEvents/stId".format(
+            reactome_api_url, pathway_id))
 
-            for pathway in pathway_response:
-                pathways.add((
-                    unicode(gene, "utf-8"),
+        if not response:
+            continue
+
+        response_values = set(response[1:-1].split(", "))
+
+        reactions_to_pathways[pathway_id] = response_values
+        reaction_ids |= response_values
+
+    reactions = dict.fromkeys(reaction_ids)
+    for reaction_id in reactions:
+        reactions[reaction_id] = {}
+        reactions[reaction_id]["input"] = set()
+        reactions[reaction_id]["output"] = set()
+
+        response = query("{}/data/query/{}".format(
+            reactome_api_url, reaction_id))
+
+        if not response:
+            continue
+
+        for metabolite in response["input"]:
+            if (isinstance(metabolite, dict) and
+                    metabolite["className"] == "Protein"):
+                reactions[reaction_id]["input"].add(
+                    metabolite["displayName"].split(" [")[0].split("(")[0])
+
+        for metabolite in response["output"]:
+            if (isinstance(metabolite, dict) and
+                    metabolite["className"] == "Protein"):
+                reactions[reaction_id]["output"].add(
+                    metabolite["displayName"].split(" [")[0].split("(")[0])
+
+    for pathway_id in pathways:
+        pathways[pathway_id]["input"] = set()
+        pathways[pathway_id]["output"] = set()
+        for reaction_id in reactions_to_pathways[pathway_id]:
+            if (gene in reactions[reaction_id]["input"] and
+                    gene not in reactions[reaction_id]["output"]):
+                pathways[pathway_id]["output"] |=\
+                        reactions[reaction_id]["output"]
+            if (gene in reactions[reaction_id]["output"] and
+                    gene not in reactions[reaction_id]["input"]):
+                pathways[pathway_id]["input"] |=\
+                        reactions[reaction_id]["input"]
+        pathways[pathway_id]["input"] =\
+                sorted(list(pathways[pathway_id]["input"]))
+        pathways[pathway_id]["output"] =\
+                sorted(list(pathways[pathway_id]["output"]))
+
+    pathways = set((unicode(gene, "utf-8"),
                     unicode("Reactome", "utf-8"),
-                    pathway["stId"],
-                    pathway["stIdVersion"].split(".")[1],
-                    pathway["displayName"]))
+                    pathway_id,
+                    pathways[pathway_id]["version"],
+                    pathways[pathway_id]["name"],
+                    tuple(pathways[pathway_id]["input"]),
+                    tuple(pathways[pathway_id]["output"]))
+                   for pathway_id in pathways
+                   if (pathways[pathway_id]["input"] or
+                       pathways[pathway_id]["output"]))
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
 def wikipathways(gene, exclude_reactome=True):
-    """Query WikiPathways for HGNC-Symbol"""
-    query_buffer = StringIO()
-    client = Curl()
-    client.setopt(client.URL,
-                  "%s/findPathwaysByText?query=%s&species=Homo_sapiens"
-                  % (WIKIPATHWAYS_API_URL, gene))
-    client.setopt(client.WRITEDATA, query_buffer)
+    """Query WikiPathways for HGNC-Gene-ID"""
+    reactome_reference_suffix = "reactome.org/PathwayBrowser/#DIAGRAM="
+    wikipathways_api_url = "https://webservice.wikipathways.org"
+    wikipathways_entry_url = "https://www.wikipathways.org/index.php/Pathway:"
+    xml_ns = {"ns1": "http://www.wso2.org/php/xsd",
+              "ns2": "http://www.wikipathways.org/webservice"}
 
-    try:
-        client.perform()
-    except PycurlError:
+    response = query(
+        "{}/findPathwaysByText?query={}&species=Homo_sapiens".format(
+            wikipathways_api_url, gene))
+
+    if response is None:
         return []
-
-    if client.getinfo(HTTP_CODE) != 200:
-        return []
-
-    try:
-        response = ET.fromstring(query_buffer.getvalue())
-    except ET.ParseError:
-        return []
-
-    query_buffer.truncate(0)
 
     pathways = []
-    for result in response.findall("ns1:result", WIKIPATHWAYS_NAMESPACES):
+    for result in response.findall("ns1:result", xml_ns):
         pathway = {}
-        pathway["id"] = result.findtext("ns2:id",
-            namespaces=WIKIPATHWAYS_NAMESPACES)
+        pathway["id"] = result.findtext("ns2:id", namespaces=xml_ns)
         pathway["revision"] = result.findtext("ns2:revision",
-            namespaces=WIKIPATHWAYS_NAMESPACES)
-        pathway["name"] = result.findtext("ns2:name",
-            namespaces=WIKIPATHWAYS_NAMESPACES)
+                                              namespaces=xml_ns)
+        pathway["name"] = result.findtext("ns2:name", namespaces=xml_ns)
         pathways.append(pathway)
 
-    client.setopt(client.URL,
-                  "%s/findInteractions?query=%s"
-                  % (WIKIPATHWAYS_API_URL, gene))
-    client.setopt(client.WRITEDATA, query_buffer)
+    response = query("{}/findInteractions?query={}".format(
+        wikipathways_api_url, gene))
 
-    try:
-        client.perform()
-    except PycurlError:
+    if response is None:
         return []
 
-    if client.getinfo(HTTP_CODE) != 200:
-        return []
-
-    try:
-        response = ET.fromstring(query_buffer.getvalue())
-    except ET.ParseError:
-        return []
-
-    query_buffer.truncate(0)
-
-    interactions = {pathway["id"]: {"left": set(),
-                                    "right": set()}
+    interactions = {pathway["id"]: {"left": set(), "right": set()}
                     for pathway in pathways}
 
-    for result in response.findall("ns1:result", WIKIPATHWAYS_NAMESPACES):
-        species = result.findtext("ns2:species",
-                                  namespaces=WIKIPATHWAYS_NAMESPACES)
+    for result in response.findall("ns1:result", xml_ns):
+        species = result.findtext("ns2:species", namespaces=xml_ns)
         if species == "Homo sapiens":
-            pathway_id = result.findtext("ns2:id",
-                                         namespaces=WIKIPATHWAYS_NAMESPACES)
-            for field in result.findall("ns2:fields", WIKIPATHWAYS_NAMESPACES):
-                name = field.findtext("ns2:name",
-                                      namespaces=WIKIPATHWAYS_NAMESPACES)
+            pathway_id = result.findtext("ns2:id", namespaces=xml_ns)
+            for field in result.findall("ns2:fields", xml_ns):
+                name = field.findtext("ns2:name", namespaces=xml_ns)
                 if name in ("source", "indexerId"):
                     continue
                 values = set()
-                for value in field.findall("ns2:values",
-                                           namespaces=WIKIPATHWAYS_NAMESPACES):
-                    try:
-                       values.add(value.text.upper())
-                    except AttributeError:
-                        continue
+                for value in field.findall("ns2:values", namespaces=xml_ns):
+                    if value.text and len(value.text.split(" ")) == 1:
+                        values.add(value.text.upper())
                 if gene.upper() in values:
                     continue
                 interactions[pathway_id][name] |= values
 
     for pathway_id in interactions:
         interactions[pathway_id]["left"] =\
-                sorted(list(interactions[pathway_id]["left"]))
+                sorted([unicode(metabolite, "utf-8")
+                        for metabolite in interactions[pathway_id]["left"]])
         interactions[pathway_id]["right"] =\
-                sorted(list(interactions[pathway_id]["right"]))
+                sorted([unicode(metabolite, "utf-8")
+                        for metabolite in interactions[pathway_id]["right"]])
 
-    pathways = set((unicode(gene, "utf-8"),
-                    unicode("WikiPathways", "utf-8"),
-                    unicode(pathway["id"], "utf-8"),
-                    unicode(pathway["revision"], "utf-8"),
-                    unicode(pathway["name"], "utf-8"),
-                    unicode(" ".join(interactions[pathway["id"]]["left"])),
-                    unicode(" ".join(interactions[pathway["id"]]["right"])))
-                   for pathway in pathways)
+    pathway_results = set((unicode(gene, "utf-8"),
+                           unicode("WikiPathways", "utf-8"),
+                           unicode(pathway["id"], "utf-8"),
+                           unicode(pathway["revision"], "utf-8"),
+                           unicode(pathway["name"], "utf-8"),
+                           tuple(interactions[pathway["id"]]["left"]),
+                           tuple(interactions[pathway["id"]]["right"]))
+                          for pathway in pathways
+                          if (interactions[pathway["id"]]["left"] or
+                              interactions[pathway["id"]]["right"]))
+
 
     if not exclude_reactome:
-        return sorted(list(pathways), key=lambda pathway: pathway[2])
-
-    client = Curl()
-    query_buffer = StringIO()
+        return sorted(list(pathway_results), key=lambda pathway: pathway[2])
 
     unique_pathways = set()
-    for pathway in pathways:
-        client.setopt(client.URL, WIKIPATHWAYS_ENTRY_URL + pathway[2])
-        client.setopt(client.WRITEDATA, query_buffer)
+    for pathway in pathway_results:
+        response = query("{}{}".format(wikipathways_entry_url, pathway[2]))
 
-        try:
-            client.perform()
-        except PycurlError:
-            continue
-
-        if client.getinfo(HTTP_CODE) != 200:
-            continue
-
-        response = query_buffer.getvalue()
-        query_buffer.truncate(0)
-        if REACTOME_ORIGIN_SUFFIX not in response:
+        if reactome_reference_suffix not in response:
             unique_pathways.add(pathway)
 
     return sorted(list(unique_pathways), key=lambda pathway: pathway[2])
 
 def log_kegg_release():
     """Write queried KEGG release information to log file"""
-    query_buffer = StringIO()
-    client = Curl()
+    kegg_info_url = "http://rest.kegg.jp/info/pathway"
 
-    client.setopt(client.URL, KEGG_INFO_URL)
-    client.setopt(client.WRITEDATA, query_buffer)
+    response = query(kegg_info_url)
 
-    try:
-        client.perform()
-    except PycurlError:
-        logging.warning("\tKEGG release not retreived.")
-        return
-
-    if client.getinfo(HTTP_CODE) != 200:
-        logging.warning("\tKEGG release not retreived.")
-        return
-
-    release_response = query_buffer.getvalue().split("\n")
-    query_buffer.truncate(0)
-    release = release_response[1].replace("path", "").strip()
+    release_info = response.split("\n")
+    release = release_info[1].replace("path", "").strip()
     logging.info("KEGG version: %s", release)
 
 def log_reactome_release():
     """Write queried Reactome release information to log file"""
-    query_buffer = StringIO()
-    client = Curl()
+    reactome_info_url =\
+        "https://reactome.org/ContentService/data/database/version"
 
-    client.setopt(client.URL, REACTOME_INFO_URL)
-    client.setopt(client.WRITEDATA, query_buffer)
-
-    try:
-        client.perform()
-    except PycurlError:
-        logging.warning("\tReactome release not retreived.")
-        return
-
-    if client.getinfo(HTTP_CODE) != 200:
-        logging.warning("\tReactome release not retreived.")
-        return
-
-    release = query_buffer.getvalue()
-    query_buffer.truncate(0)
+    release = query(reactome_info_url)
     logging.info("Reactome version: %s", release)
 
-def log_wikipathways_release():
-    """Write WikiPathways release information to log file"""
-    logging.info("WikiPathways version: NA")
-
 def build_pathway_db():
-    """Build the pathway database"""
-    logging.info("Starting build: %s", PATHWAY_DB_TMP_FP)
-    logging.info("HGNC source: %s", GENE_ID_FP)
+    """Build pathway database"""
+    parser = argparse.ArgumentParser(description="")
+    parser.add_argument("-c", "--config",
+                        default=os.path.join(os.path.dirname(__file__),
+                                             "../docs/codes3d.conf"),
+                        help="The configuration file to be used.")
+
+    args = parser.parse_args()
+
+    config = configparser.ConfigParser()
+    config.read(args.config)
+
+    gene_id_fp = os.path.join(os.path.dirname(__file__),
+                              config.get("Defaults", "gene_id_fp"))
+    pathway_db_fp = os.path.join(os.path.dirname(__file__),
+                                 config.get("Defaults", "pathway_db_fp"))
+    pathway_db_tmp_fp = os.path.join(os.path.dirname(__file__),
+                                     config.get("Defaults",
+                                                "pathway_db_tmp_fp"))
+    pathway_db_tab_fp = os.path.join(os.path.dirname(__file__),
+                                     config.get("Defaults",
+                                                "pathway_db_tab_fp"))
+    pathway_db_log_fp = os.path.join(os.path.dirname(__file__),
+                                     config.get("Defaults",
+                                                "pathway_db_log_fp"))
+
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.basicConfig(
+        filename=pathway_db_log_fp,
+        level=logging.INFO,
+        format="%(asctime)s\t%(levelname)s\t%(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S")
+
+    logging.info("Build started.")
+    logging.info("File name during build: %s", pathway_db_tmp_fp)
+    logging.info("HGNC source: %s", gene_id_fp)
     log_kegg_release()
     log_reactome_release()
-    log_wikipathways_release()
 
-    with open(GENE_ID_FP) as gene_file:
+    with open(gene_id_fp) as gene_file:
         genes = gene_file.read().splitlines()
 
     gene_num_bar = progressbar.ProgressBar(max_value=len(genes))
+    gene_num_bar.update(0)
 
     genes = sorted(dict.fromkeys(genes).keys(),
                    key=lambda gene: gene.capitalize())
 
-    tab_file = open(PATHWAY_DB_TAB_FP, "w")
-    tab_writer = csv.writer(tab_file, delimiter="\t")
+    tab_file = open(pathway_db_tab_fp, "w")
+    tab_writer = unicodecsv.writer(tab_file, delimiter="\t")
 
-    pathway_db = sqlite3.connect(PATHWAY_DB_TMP_FP)
+    pathway_db = sqlite3.connect(pathway_db_tmp_fp)
     pathway_db_cursor = pathway_db.cursor()
     pathway_db_cursor.execute("""
         DROP TABLE IF EXISTS genes
         """)
     pathway_db_cursor.execute("""
-        DROP TABLE IF EXISTS pathways
+        DROP TABLE IF EXISTS names
+        """)
+    pathway_db_cursor.execute("""
+        DROP TABLE IF EXISTS upstream
+        """)
+    pathway_db_cursor.execute("""
+        DROP TABLE IF EXISTS downstream
         """)
     pathway_db_cursor.execute("""
         CREATE TABLE genes (
@@ -391,18 +385,43 @@ def build_pathway_db():
             ON CONFLICT IGNORE)
         """)
     pathway_db_cursor.execute("""
-        CREATE TABLE pathways (
+        CREATE TABLE names (
             database TEXT,
             pathway TEXT,
             pathway_name TEXT,
             PRIMARY KEY (
                 database,
+                pathway)
+            ON CONFLICT IGNORE)
+        """)
+    pathway_db_cursor.execute("""
+        CREATE TABLE upstream (
+            database TEXT,
+            pathway TEXT,
+            gene TEXT,
+            upstream TEXT,
+            PRIMARY KEY (
+                database,
                 pathway,
-                pathway_name)
+                gene,
+                upstream)
+            ON CONFLICT IGNORE)
+        """)
+    pathway_db_cursor.execute("""
+        CREATE TABLE downstream (
+            database TEXT,
+            pathway TEXT,
+            gene TEXT,
+            downstream TEXT,
+            PRIMARY KEY (
+                database,
+                pathway,
+                gene,
+                downstream)
             ON CONFLICT IGNORE)
         """)
     for i, gene in enumerate(genes):
-        for database in (kegg, reactome, wikipathways):
+        for database in (reactome, wikipathways):
             for pathway in database(gene):
                 pathway_db_cursor.execute("""
                     INSERT INTO genes
@@ -410,50 +429,38 @@ def build_pathway_db():
                     """, (pathway[1], pathway[2], pathway[0]))
 
                 pathway_db_cursor.execute("""
-                    INSERT INTO pathways
+                    INSERT INTO names
                     VALUES (?, ?, ?)
                     """, (pathway[1], pathway[2], pathway[4]))
 
-                tab_writer.writerow(pathway)
+                for upstream in pathway[5]:
+                    pathway_db_cursor.execute("""
+                        INSERT INTO upstream
+                        VALUES (?, ?, ?, ?)
+                        """, (pathway[1], pathway[2], pathway[0], upstream))
+
+                for downstream in pathway[6]:
+                    pathway_db_cursor.execute("""
+                        INSERT INTO downstream
+                        VALUES (?, ?, ?, ?)
+                        """, (pathway[1], pathway[2], pathway[0], downstream))
+
+                upstream_genes = ", ".join(pathway[5])
+                downstream_genes = ", ".join(pathway[6])
+                tab_writer.writerow(pathway[:5] + (upstream_genes,
+                                                   downstream_genes))
+
         gene_num_bar.update(i)
 
     pathway_db.commit()
     pathway_db.close()
     tab_file.close()
 
-    os.rename(PATHWAY_DB_TMP_FP, PATHWAY_DB_FP)
-    logging.info("Build complete: %s", PATHWAY_DB_FP)
+    os.rename(pathway_db_tmp_fp, pathway_db_fp)
+    logging.info("Renamed %s to %s.", pathway_db_tmp_fp, pathway_db_fp)
+    logging.info("Build completed.")
 
 
 if __name__ == "__main__":
-    PARSER = argparse.ArgumentParser(description="")
-    PARSER.add_argument("-c", "--config",
-                        default=os.path.join(os.path.dirname(__file__),
-                                             "../docs/codes3d.conf"),
-                        help="The configuration file to be used.")
-
-    ARGS = PARSER.parse_args()
-
-    CONFIG = configparser.ConfigParser()
-    CONFIG.read(ARGS.config)
-
-    GENE_ID_FP = os.path.join(os.path.dirname(__file__),
-                              CONFIG.get("Defaults", "GENE_ID_FP"))
-    PATHWAY_DB_FP = os.path.join(os.path.dirname(__file__),
-                                 CONFIG.get("Defaults", "PATHWAY_DB_FP"))
-    PATHWAY_DB_TMP_FP = os.path.join(os.path.dirname(__file__),
-                                 CONFIG.get("Defaults", "PATHWAY_DB_TMP_FP"))
-    PATHWAY_DB_TAB_FP = os.path.join(os.path.dirname(__file__),
-                                     CONFIG.get("Defaults",
-                                                "PATHWAY_DB_TAB_FP"))
-    PATHWAY_DB_LOG_FP = os.path.join(os.path.dirname(__file__),
-                                     CONFIG.get("Defaults",
-                                                "PATHWAY_DB_LOG_FP"))
-
-    logging.getLogger("requests").setLevel(logging.WARNING)
-    logging.basicConfig(
-        filename=PATHWAY_DB_LOG_FP,
-        level=logging.INFO,
-        format="%(asctime)s\t%(levelname)s\t%(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S")
     build_pathway_db()
+
