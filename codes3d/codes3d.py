@@ -7,12 +7,14 @@ import bisect
 import configparser
 import csv
 import json
+import logging
 import multiprocessing
 import math
 import operator
 import os
 import sys
 import pandas
+import progressbar
 import psutil
 import pybedtools
 import re
@@ -20,6 +22,8 @@ import requests
 import shutil
 import sqlite3
 import time
+import unicodecsv
+import xml.etree.ElementTree
 from operator import itemgetter
 import Bio
 from Bio import SeqIO
@@ -1035,7 +1039,7 @@ def produce_summary(
                                 engine='c', compression=None, memory_map=True)
 
     all_snps = genes.keys()
-    all_genes = dict.fromkeys(gene_exp).keys()
+    all_genes = gene_exp.keys()
     all_tissues = list(GENE_DF)
 
     genes_tissues = [
@@ -1104,7 +1108,7 @@ def produce_summary(
     summary.close()
     sig_file.close()
 
-    return gene_exp
+    return all_genes
 
 def compute_adj_pvalues(p_values):
     """ A Benjamini-Hochberg adjustment of p values of SNP-gene eQTL
@@ -1902,68 +1906,454 @@ def build_eqtl_index(
         print("Tidying up...")
         os.remove(table_fp)
 
+def query(url):
+    """Send request to specified URL"""
+    while True:
+        try:
+            response = requests.get(url)
+            break
+        except requests.exceptions.HTTPError:
+            logging.critical("Unsucessful status code %s: %s",
+                             response.status_code, url)
+            return None
+        except requests.exceptions.ConnectionError:
+            logging.critical("Connection failure: %s", url)
+            time.sleep(60)
+            continue
+        except requests.exceptions.RequestException:
+            logging.critical("General Error: %s", url)
+            return None
+
+    if response.headers["content-type"].split(";")[0] == "application/json":
+        try:
+            content = response.json()
+        except ValueError:
+            logging.critical("Invalid JSON content: %s", url)
+            content = None
+        return content
+
+    elif response.headers["content-type"].split(";")[0] == "application/xml":
+        try:
+            content = xml.etree.ElementTree.fromstring(response.text)
+        except xml.etree.ElementTree.ParseError:
+            logging.critical("Invalid XML content: %s", url)
+            content = None
+        return content
+
+    return response.text
+
+def kegg(gene):
+    """Query Kyoto Encyclopedia of Genes and Genomes for HGNC-Gene-ID"""
+    kegg_api_url = "http://rest.kegg.jp"
+
+    gene_response = query("{}/find/genes/{}".format(kegg_api_url, gene))
+
+    if not gene_response:
+        return []
+
+    gene_entries = gene_response.split("\n")[:-1]
+
+    gene_ids = set()
+    for entry in gene_entries:
+        entry = entry.split("\t")
+        if  (entry[0].startswith("hsa:") and
+             gene in entry[1].split(";")[0].split(",")):
+            gene_ids.add(entry[0])
+
+    if not gene_ids:
+        return []
+
+    pathways = set()
+    for gene_id in gene_ids:
+        pathway_response = query("{}/link/pathway/{}".format(
+            kegg_api_url, gene_id))
+
+        if not pathway_response:
+            continue
+
+        pathway_entries = pathway_response.split("\n")[:-1]
+        pathway_ids = [entry.split("\t")[1] for entry in pathway_entries]
+
+        for pathway_id in pathway_ids:
+            pathway_response = query("{}/get/{}".format(
+                kegg_api_url, pathway_id))
+
+            if not pathway_response:
+                continue
+
+            pathway_entries = pathway_response.split("\n")
+            pathway_id = pathway_id.replace("path:", "")
+
+            for entry in pathway_entries:
+                if entry.startswith("NAME"):
+                    pathway_name =\
+                            entry.replace("NAME", "").split(" - ")[0].strip()
+                    break
+                pathway_name = "NA"
+
+            pathways.add((unicode(gene, "utf-8"),
+                          unicode("KEGG", "utf-8"),
+                          pathway_id,
+                          unicode("NA"),
+                          pathway_name))
+
+    return sorted(list(pathways), key=lambda pathway: pathway[2])
+
+
+def reactome(gene):
+    """Query Reactome for HGNC-Gene-ID"""
+    reactome_api_url = "https://www.reactome.org/ContentService"
+
+    response = query(
+        "{}/search/query?query={}&species=Homo%%20sapiens&cluster=true".format(
+            reactome_api_url, gene))
+
+    if not response:
+        return []
+
+    pathway_ids = set()
+
+    for result in response["results"]:
+        if result["typeName"] == "Pathway":
+            for entry in result["entries"]:
+                pathway_ids.add(entry["stId"])
+
+    pathways = dict.fromkeys(pathway_ids)
+
+    for pathway_id in pathway_ids:
+        response = query("{}/data/query/{}".format(
+            reactome_api_url, pathway_id))
+
+        if not response:
+            del pathways[pathway_id]
+            continue
+
+        pathways[pathway_id] = {}
+        pathways[pathway_id]["name"] = response["displayName"]
+        pathways[pathway_id]["version"] = response["stIdVersion"].split(".")[1]
+
+    reactions_to_pathways = dict.fromkeys(pathways, set())
+    reaction_ids = set()
+    for pathway_id in reactions_to_pathways:
+        response = query("{}/data/pathway/{}/containedEvents/stId".format(
+            reactome_api_url, pathway_id))
+
+        if not response:
+            continue
+
+        response_values = set(response[1:-1].split(", "))
+
+        reactions_to_pathways[pathway_id] = response_values
+        reaction_ids |= response_values
+
+    reactions = dict.fromkeys(reaction_ids)
+    for reaction_id in reactions:
+        reactions[reaction_id] = {}
+        reactions[reaction_id]["input"] = set()
+        reactions[reaction_id]["output"] = set()
+
+        response = query("{}/data/query/{}".format(
+            reactome_api_url, reaction_id))
+
+        if not response:
+            continue
+
+        for metabolite in response["input"]:
+            if (isinstance(metabolite, dict) and
+                    metabolite["className"] == "Protein"):
+                reactions[reaction_id]["input"].add(
+                    metabolite["displayName"].split(" [")[0].split("(")[0])
+
+        for metabolite in response["output"]:
+            if (isinstance(metabolite, dict) and
+                    metabolite["className"] == "Protein"):
+                reactions[reaction_id]["output"].add(
+                    metabolite["displayName"].split(" [")[0].split("(")[0])
+
+    for pathway_id in pathways:
+        pathways[pathway_id]["input"] = set()
+        pathways[pathway_id]["output"] = set()
+        for reaction_id in reactions_to_pathways[pathway_id]:
+            if (gene in reactions[reaction_id]["input"] and
+                    gene not in reactions[reaction_id]["output"]):
+                pathways[pathway_id]["output"] |=\
+                        reactions[reaction_id]["output"]
+            if (gene in reactions[reaction_id]["output"] and
+                    gene not in reactions[reaction_id]["input"]):
+                pathways[pathway_id]["input"] |=\
+                        reactions[reaction_id]["input"]
+        pathways[pathway_id]["input"] =\
+                sorted(list(pathways[pathway_id]["input"]))
+        pathways[pathway_id]["output"] =\
+                sorted(list(pathways[pathway_id]["output"]))
+
+    pathways = set((unicode(gene, "utf-8"),
+                    unicode("Reactome", "utf-8"),
+                    pathway_id,
+                    pathways[pathway_id]["version"],
+                    pathways[pathway_id]["name"],
+                    tuple(pathways[pathway_id]["input"]),
+                    tuple(pathways[pathway_id]["output"]))
+                   for pathway_id in pathways
+                   if (pathways[pathway_id]["input"] or
+                       pathways[pathway_id]["output"]))
+
+    return sorted(list(pathways), key=lambda pathway: pathway[2])
+
+def wikipathways(gene, exclude_reactome=True):
+    """Query WikiPathways for HGNC-Gene-ID"""
+    reactome_reference_suffix = "reactome.org/PathwayBrowser/#DIAGRAM="
+    wikipathways_api_url = "https://webservice.wikipathways.org"
+    wikipathways_entry_url = "https://www.wikipathways.org/index.php/Pathway:"
+    xml_ns = {"ns1": "http://www.wso2.org/php/xsd",
+              "ns2": "http://www.wikipathways.org/webservice"}
+
+    response = query(
+        "{}/findPathwaysByText?query={}&species=Homo_sapiens".format(
+            wikipathways_api_url, gene))
+
+    if response is None:
+        return []
+
+    pathways = []
+    for result in response.findall("ns1:result", xml_ns):
+        pathway = {}
+        pathway["id"] = result.findtext("ns2:id", namespaces=xml_ns)
+        pathway["revision"] = result.findtext("ns2:revision",
+                                              namespaces=xml_ns)
+        pathway["name"] = result.findtext("ns2:name", namespaces=xml_ns)
+        pathways.append(pathway)
+
+    response = query("{}/findInteractions?query={}".format(
+        wikipathways_api_url, gene))
+
+    if response is None:
+        return []
+
+    interactions = {pathway["id"]: {"left": set(), "right": set()}
+                    for pathway in pathways}
+
+    for result in response.findall("ns1:result", xml_ns):
+        species = result.findtext("ns2:species", namespaces=xml_ns)
+        if species == "Homo sapiens":
+            pathway_id = result.findtext("ns2:id", namespaces=xml_ns)
+            for field in result.findall("ns2:fields", xml_ns):
+                name = field.findtext("ns2:name", namespaces=xml_ns)
+                if name in ("source", "indexerId"):
+                    continue
+                values = set()
+                for value in field.findall("ns2:values", namespaces=xml_ns):
+                    if value.text and len(value.text.split(" ")) == 1:
+                        values.add(value.text.upper())
+                if gene.upper() in values:
+                    continue
+                interactions[pathway_id][name] |= values
+
+    for pathway_id in interactions:
+        interactions[pathway_id]["left"] =\
+                sorted([unicode(metabolite, "utf-8")
+                        for metabolite in interactions[pathway_id]["left"]])
+        interactions[pathway_id]["right"] =\
+                sorted([unicode(metabolite, "utf-8")
+                        for metabolite in interactions[pathway_id]["right"]])
+
+    pathway_results = set((unicode(gene, "utf-8"),
+                           unicode("WikiPathways", "utf-8"),
+                           unicode(pathway["id"], "utf-8"),
+                           unicode(pathway["revision"], "utf-8"),
+                           unicode(pathway["name"], "utf-8"),
+                           tuple(interactions[pathway["id"]]["left"]),
+                           tuple(interactions[pathway["id"]]["right"]))
+                          for pathway in pathways
+                          if (interactions[pathway["id"]]["left"] or
+                              interactions[pathway["id"]]["right"]))
+
+
+    if not exclude_reactome:
+        return sorted(list(pathway_results), key=lambda pathway: pathway[2])
+
+    unique_pathways = set()
+    for pathway in pathway_results:
+        response = query("{}{}".format(wikipathways_entry_url, pathway[2]))
+
+        if reactome_reference_suffix not in response:
+            unique_pathways.add(pathway)
+
+    return sorted(list(unique_pathways), key=lambda pathway: pathway[2])
+
+def log_kegg_release():
+    """Write KEGG release information to log file"""
+    kegg_info_url = "http://rest.kegg.jp/info/pathway"
+
+    response = query(kegg_info_url)
+
+    response = response.split("\n")
+    release = response[1].replace("path", "").strip()
+    release = release.split("/")[0].split(" ")[1].split(".")[0]
+    logging.info("KEGG version: %s", release)
+
+def log_reactome_release():
+    """Write Reactome release information to log file"""
+    reactome_info_url =\
+        "https://reactome.org/ContentService/data/database/version"
+
+    release = query(reactome_info_url)
+    logging.info("Reactome version: %s", release)
+
+def log_wikipathways_release():
+    """Write queried WikiPathways release information to log file"""
+    logging.info("WikiPathways version: NA")
+
+def build_pathway_db(
+        hgnc_gene_id_fp,
+        pathway_db_fp,
+        pathway_db_tmp_fp,
+        pathway_db_tab_fp,
+        pathway_db_log_fp):
+    """Build pathway database"""
+
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.basicConfig(
+        filename=pathway_db_log_fp,
+        filemode="w",
+        level=logging.INFO,
+        format="%(asctime)s\t%(levelname)s\t%(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S")
+
+    logging.info("Build started.")
+    logging.info("File name during build: %s", pathway_db_tmp_fp)
+    logging.info("HGNC source: %s", hgnc_gene_id_fp)
+    log_kegg_release()
+    log_reactome_release()
+    log_wikipathways_release()
+
+    with open(hgnc_gene_id_fp) as gene_file:
+        genes = gene_file.read().splitlines()
+
+    genes = sorted(dict.fromkeys(genes).keys(),
+                   key=lambda gene: gene.capitalize())
+
+    tab_file = open(pathway_db_tab_fp, "w")
+    tab_writer = unicodecsv.writer(tab_file, delimiter="\t")
+
+    pathway_db = sqlite3.connect(pathway_db_tmp_fp)
+    pathway_db_cursor = pathway_db.cursor()
+    pathway_db_cursor.execute("""
+        DROP TABLE IF EXISTS genes
+        """)
+    pathway_db_cursor.execute("""
+        DROP TABLE IF EXISTS names
+        """)
+    pathway_db_cursor.execute("""
+        DROP TABLE IF EXISTS upstream
+        """)
+    pathway_db_cursor.execute("""
+        DROP TABLE IF EXISTS downstream
+        """)
+    pathway_db_cursor.execute("""
+        CREATE TABLE genes (
+            database TEXT,
+            pathway TEXT,
+            gene TEXT,
+            PRIMARY KEY (
+                database,
+                pathway,
+                gene)
+            ON CONFLICT IGNORE)
+        """)
+    pathway_db_cursor.execute("""
+        CREATE TABLE names (
+            database TEXT,
+            pathway TEXT,
+            pathway_name TEXT,
+            PRIMARY KEY (
+                database,
+                pathway)
+            ON CONFLICT IGNORE)
+        """)
+    pathway_db_cursor.execute("""
+        CREATE TABLE upstream (
+            database TEXT,
+            pathway TEXT,
+            gene TEXT,
+            upstream TEXT,
+            PRIMARY KEY (
+                database,
+                pathway,
+                gene,
+                upstream)
+            ON CONFLICT IGNORE)
+        """)
+    pathway_db_cursor.execute("""
+        CREATE TABLE downstream (
+            database TEXT,
+            pathway TEXT,
+            gene TEXT,
+            downstream TEXT,
+            PRIMARY KEY (
+                database,
+                pathway,
+                gene,
+                downstream)
+            ON CONFLICT IGNORE)
+        """)
+
+    gene_num_bar = progressbar.ProgressBar(max_value=len(genes))
+    gene_num_bar.update(0)
+
+    for i, gene in enumerate(genes, 1):
+        for database in (reactome, wikipathways):
+            for pathway in database(gene):
+                pathway_db_cursor.execute("""
+                    INSERT INTO genes
+                    VALUES (?, ?, ?)
+                    """, (pathway[1], pathway[2], pathway[0]))
+
+                pathway_db_cursor.execute("""
+                    INSERT INTO names
+                    VALUES (?, ?, ?)
+                    """, (pathway[1], pathway[2], pathway[4]))
+
+                for upstream in pathway[5]:
+                    pathway_db_cursor.execute("""
+                        INSERT INTO upstream
+                        VALUES (?, ?, ?, ?)
+                        """, (pathway[1], pathway[2], pathway[0], upstream))
+
+                for downstream in pathway[6]:
+                    pathway_db_cursor.execute("""
+                        INSERT INTO downstream
+                        VALUES (?, ?, ?, ?)
+                        """, (pathway[1], pathway[2], pathway[0], downstream))
+
+                upstream = ", ".join(pathway[5]) if pathway[5] else "NA"
+                downstream = ", ".join(pathway[6]) if pathway[6] else "NA"
+                tab_writer.writerow(pathway[:5] + (upstream, downstream))
+
+        gene_num_bar.update(i)
+
+    pathway_db.commit()
+    pathway_db.close()
+    tab_file.close()
+
+    os.rename(pathway_db_tmp_fp, pathway_db_fp)
+    logging.info("Renamed %s to %s.", pathway_db_tmp_fp, pathway_db_fp)
+    logging.info("Build completed.")
+
 
 def parse_summary_file(
         summary_file,
         buffer_size):
 
     print("Parsing input file...")
-    snps_to_genes = {}
-    gene_exp = {}
+    genes = set()
     with open(summary_file, buffering=buffer_size) as summary:
         next(summary)
         for line in summary:
-            line = line.split("\t")
             gene = line[3]
-            tissue = line[7]
+            genes.add(gene)
 
-            if gene not in gene_exp:
-                gene_exp[gene] = {}
-                gene_exp[gene]['max_tissue'] = line[18]
-                try:
-                    gene_exp[gene]['max_rate'] = float(line[19])
-                except ValueError:
-                    gene_exp[gene]['max_rate'] = "NA"
-                gene_exp[gene]['min_tissue'] = line[20]
-                try:
-                    gene_exp[gene]['min_rate'] = float(line[21])
-                except ValueError:
-                    gene_exp[gene]['min_rate'] = "NA"
-
-            if tissue not in gene_exp[gene]:
-                try:
-                    gene_exp[gene][tissue] = float(line[17])
-                except ValueError:
-                    gene_exp[gene][tissue] = "NA"
-
-    return gene_exp
-
-def expression_distribution(expr):
-    expr = {tissue: expr[tissue] for tissue in expr
-            if tissue not in (
-                "max_rate", "max_tissue", "min_rate", "min_tissue")
-            and expr[tissue] != "NA"}
-
-    mean = sum([expr[tissue] for tissue in expr])/len(expr)
-
-    try:
-        expr["sdv"] =\
-            math.sqrt(sum([(expr[tissue] - mean)**2 for tissue in expr])/\
-                      (len(expr)-1))
-    except ZeroDivisionError:
-        expr["sdv"] = 0.0
-    expr["mean"] = mean
-
-    return expr
-
-def expression_variance(expr):
-    mean = expr.pop("mean")
-    sdv = expr.pop("sdv")
-
-    try:
-        return {tissue: (expr[tissue] -  mean)/sdv for tissue in expr}
-    except ZeroDivisionError:
-        return {tissue: 0.0 for tissue in expr}
+    return list(genes)
 
 def produce_pathway_summary(
         gene_exp,
@@ -1973,61 +2363,7 @@ def produce_pathway_summary(
         num_processes,
         p_value):
 
-    print("Computing Z-Score...")
-    genes = gene_exp.keys()
-    current_process = psutil.Process()
-    pool = multiprocessing.Pool(
-            processes=min(num_processes, len(current_process.cpu_affinity())))
-
-    gene_entries = pool.map(expression_distribution,
-                            [gene_exp[gene] for gene in genes])
-    for i, gene in enumerate(genes):
-        gene_exp[gene] = gene_entries[i]
-
-    exp_dev = dict.fromkeys(genes, {})
-    exp_entries = pool.map(expression_variance,
-                           [gene_exp[gene] for gene in genes])
-    for i, gene in enumerate(genes):
-        exp_dev[gene] = exp_entries[i]
-
-    pool.close()
-
-    print("Mapping genes to pathways...")
-    pathways = {}
-    pathway_db = sqlite3.connect(pathway_db_fp)
-    pathway_db_cursor = pathway_db.cursor()
-    for gene in exp_dev:
-        pathway_of_gene = [pathway[0].encode("utf-8") for pathway in
-                           pathway_db_cursor.execute("""
-                               SELECT pathway
-                               FROM genes
-                               WHERE gene=?
-                               """, (gene,))]
-        for pathway in pathway_of_gene:
-            if pathway not in pathways:
-                pathways[pathway] = {}
-            for tissue in exp_dev[gene]:
-                if tissue not in pathways[pathway]:
-                    pathways[pathway][tissue] = {}
-                pathways[pathway][tissue][gene] = exp_dev[gene][tissue]
-
-    pathway_db.close()
-
-    print("Filtering for significant scores...")
-    threshold = st.norm.ppf(1 - 0.5*p_value)
-    for pathway in pathways.keys():
-        for tissue in pathways[pathway].keys():
-            pathways[pathway][tissue] = {
-                gene: pathways[pathway][tissue][gene]
-                for gene in pathways[pathway][tissue]
-                if pathways[pathway][tissue][gene] >= threshold}
-            if not pathways[pathway][tissue]:
-                del pathways[pathway][tissue]
-        if not pathways[pathway]:
-            del pathways[pathway]
-
-    print(pathways)
-
+    pass
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="")
@@ -2133,10 +2469,10 @@ if __name__ == "__main__":
         args.fdr_threshold, args.local_databases_only,
         args.num_processes, args.output_dir, gene_dict_fp, snp_dict_fp,
         suppress_intermediate_files=args.suppress_intermediate_files)
-    gene_exp = produce_summary(
+    all_genes = produce_summary(
          p_values, snps, genes, gene_database_fp, expression_table_fp,
          args.fdr_threshold, args.output_dir, args.buffer_size_in,
          args.buffer_size_out, args.num_processes_summary)
-    produce_pathway_summary(gene_exp, pathway_db_fp, args.output_dir,
+    produce_pathway_summary(all_genes, pathway_db_fp, args.output_dir,
          args.buffer_size_out, args.num_processes_summary,
          args.significant_expression)

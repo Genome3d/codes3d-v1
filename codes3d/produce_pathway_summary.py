@@ -48,9 +48,9 @@ if __name__ == "__main__":
     if not os.path.isdir(args.output_dir):
 	    print('\tCreating output directory...')
 	    os.mkdir(args.output_dir)
-    gene_exp = codes3d.parse_summary_file(args.summary_file,
+    all_genes = codes3d.parse_summary_file(args.summary_file,
                                           args.buffer_size_in)
-    codes3d.produce_pathway_summary(gene_exp,
+    codes3d.produce_pathway_summary(all_genes,
                                     pathway_db_fp, args.output_dir,
                                     args.buffer_size_out,
                                     args.num_processes_summary,
