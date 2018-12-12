@@ -36,4 +36,3 @@ if __name__ == "__main__":
                              pathway_db_tab_fp, pathway_db_log_fp)
 
 
-
