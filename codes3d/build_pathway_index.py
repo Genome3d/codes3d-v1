@@ -35,3 +35,5 @@ if __name__ == "__main__":
     codes3d.build_pathway_db(hgnc_gene_id_fp, pathway_db_fp, pathway_db_tmp_fp,
                              pathway_db_tab_fp, pathway_db_log_fp)
 
+
+
