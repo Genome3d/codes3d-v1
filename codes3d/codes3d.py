@@ -1971,12 +1971,12 @@ def kegg(gene):
     if response is None:
         return []
 
-    gene_entries = response.split("\n")[:-1]
+    gene_entries = response.split("\n")
     gene_id = None
 
-    for entry in [entry.split("\t") for entry in gene_entries]:
-        if  (entry[0].split(":")[0] == "hsa" and
-                gene in entry[1].split(";")[0].split(",")):
+    for entry in [entry.split("\t") for entry in gene_entries if entry]:
+        if (entry[0].split(":")[0] == "hsa" and
+               gene in entry[1].split(";")[0].split(",")):
             gene_id = entry[0]
             break
 
@@ -1989,9 +1989,9 @@ def kegg(gene):
     if response is None:
         return []
 
-    pathway_entries = response.split("\n")[:-1]
-    pathway_ids = [entry.split("\t")[1] for entry in pathway_entries]
+    pathway_entries = response.split("\n")
 
+    pathway_ids = [entry.split("\t")[1] for entry in pathway_entries if entry]
     for pathway_id in pathway_ids:
         pathway_id = pathway_id.split(":")[1]
         response = query("{}/get/{}".format(kegg_api_url, pathway_id))
@@ -2367,6 +2367,7 @@ def build_pathway_db(
 
     pathway_db = sqlite3.connect(pathway_db_tmp_fp)
     pathway_db_cursor = pathway_db.cursor()
+
     pathway_db_cursor.execute("""
         DROP TABLE IF EXISTS genes
         """)
@@ -2379,6 +2380,10 @@ def build_pathway_db(
     pathway_db_cursor.execute("""
         DROP TABLE IF EXISTS downstream
         """)
+    pathway_db_cursor.execute("""
+        DROP TABLE IF EXISTS expression
+        """)
+
     pathway_db_cursor.execute("""
         CREATE TABLE genes (
             database TEXT,
@@ -2427,6 +2432,19 @@ def build_pathway_db(
             ON CONFLICT IGNORE)
         """)
 
+    pathway_db_cursor.execute("""
+        CREATE TABLE expression (
+            gene TEXT,
+            tissue TEXT,
+            expression REAL,
+            z_score REAL,
+            significance REAL,
+            PRIMARY KEY (
+                gene,
+                tissue)
+            ON CONFLICT IGNORE)
+        """)
+
     logging.info("Build started.")
     logging.info("File name during build: %s", pathway_db_tmp_fp)
     logging.info("HGNC source: %s", hgnc_gene_id_fp)
@@ -2434,7 +2452,11 @@ def build_pathway_db(
     log_reactome_release()
     log_wikipathways_release()
 
-    progress = 0
+    queried_genes = set()
+    upstream_genes = set()
+    downstream_genes = set()
+
+    num_queried_genes = 0
     with open(hgnc_gene_id_fp, "r") as hgnc_gene_file:
         for line in hgnc_gene_file:
             gene = line.strip()
@@ -2452,27 +2474,39 @@ def build_pathway_db(
                         VALUES (?, ?, ?)
                         """, (pathway[1], pathway[2], pathway[4]))
 
-                    for upstream in pathway[5]:
+                    for upstream_gene in pathway[5]:
+                        upstream_genes.add(upstream_gene)
                         pathway_db_cursor.execute("""
                             INSERT INTO upstream
                             VALUES (?, ?, ?, ?)
                             """, (pathway[1], pathway[2], pathway[0],
-                                  upstream))
+                                  upstream_gene))
 
-                    for downstream in pathway[6]:
+                    for downstream_gene in pathway[6]:
+                        downstream_genes.add(downstream_gene)
                         pathway_db_cursor.execute("""
                             INSERT INTO downstream
                             VALUES (?, ?, ?, ?)
                             """, (pathway[1], pathway[2], pathway[0],
-                                  downstream))
+                                  downstream_gene))
 
-                    upstream = ", ".join(pathway[5]) if pathway[5] else "NA"
-                    downstream = ", ".join(pathway[6]) if pathway[6] else "NA"
+                    if pathway[5]:
+                        upstream = ", ".join(pathway[5])
+                    else:
+                        upstream = "NA"
+
+                    if pathway[6]:
+                        downstream = ", ".join(pathway[6])
+                    else:
+                        downstream = "NA"
 
                     tab_writer.writerow(pathway[:5] + (upstream, downstream))
 
-            progress += 1
-            gene_num_bar.update(progress)
+            queried_genes.add(gene)
+            num_queried_genes += 1
+            gene_num_bar.update(num_queried_genes)
+
+    unqueried_genes = (upstream_genes | downstream_genes) - queried_genes
 
     pathway_db.commit()
     pathway_db.close()
