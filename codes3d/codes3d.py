@@ -2068,6 +2068,9 @@ def kegg(gene):
 
         response = query("{}/get/{}/kgml".format(kegg_api_url, pathway_id),
                          "text/plain")
+
+        header_comment = None
+
         while response:
             response = response.lstrip()
             if (response[0:5] == "<?xml" or
@@ -2075,25 +2078,26 @@ def kegg(gene):
                 response = response[response.find(">")+1:]
                 continue
             if response[0:4] == "<!--":
-                pathway_version = response[4:response.find("-->")]
+                header_comment = response[4:response.find("-->")].strip()
             break
 
-        if response is None:
-            pathway_version = "NA"
+        months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul",
+                  "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+        if (header_comment and
+                "Creation date: " in header_comment and
+                len(header_comment.split(" ")) > 4 and
+                header_comment.split(" ")[2] in months):
+
+            header_comment = header_comment.split(" ")
+            month = str(months.index(header_comment[2]) + 1)
+            day = header_comment[3].replace(",", "")
+            year = header_comment[4]
+            pathway_version = "-".join([year, month, day])
 
         else:
-            pathway_version = pathway_version.replace("Creation date:",
-                                                      "").strip()
-            pathway_version = pathway_version.replace(",", "").split(" ")
-            month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug",
-                     "Sep", "Oct", "Nov", "Dec"]
-            try:
-                pathway_version = "-".join([
-                    pathway_version[2],
-                    str(month.index(pathway_version[0]) + 1),
-                    pathway_version[1]])
-            except (IndexError, ValueError) as e:
-               pathway_version = "NA"
+            pathway_version = "NA"
+
 
         pathways.add((unicode(gene, "utf-8"),
                       unicode("KEGG", "utf-8"),
@@ -2164,17 +2168,23 @@ def reactome(gene):
         if response is None:
             continue
 
-        for metabolite in response["input"]:
-            if (isinstance(metabolite, dict) and
-                    metabolite["className"] == "Protein"):
-                reactions[reaction_id]["input"].add(
-                    metabolite["displayName"].split(" [")[0].split("(")[0])
+        if "input" in response:
+            for metabolite in response["input"]:
+                if (isinstance(metabolite, dict) and
+                        metabolite["className"] == "Protein"):
+                    name = metabolite["displayName"]
+                    name = name.split(" [")[0].split("(")[0]
+                    name = name.split("-")[-1]
+                    reactions[reaction_id]["input"].add(name)
 
-        for metabolite in response["output"]:
-            if (isinstance(metabolite, dict) and
-                    metabolite["className"] == "Protein"):
-                reactions[reaction_id]["output"].add(
-                    metabolite["displayName"].split(" [")[0].split("(")[0])
+        if "output" in response:
+            for metabolite in response["output"]:
+                if (isinstance(metabolite, dict) and
+                        metabolite["className"] == "Protein"):
+                    name = metabolite["displayName"]
+                    name = name.split(" [")[0].split("(")[0]
+                    name = name.split("-")[-1]
+                    reactions[reaction_id]["output"].add(name)
 
     for pathway_id in pathways:
         pathways[pathway_id]["input"] = set()
@@ -2241,7 +2251,7 @@ def wikipathways(gene, exclude_reactome=True):
             pathway_id = result.find("ns2:id", response.nsmap).text
             for field in result.findall("ns2:fields", response.nsmap):
                 name = field.find("ns2:name", response.nsmap).text
-                if name in ("source", "indexerId"):
+                if name not in ("left", "right"):
                     continue
                 values = set()
                 for value in field.findall("ns2:values", response.nsmap):
