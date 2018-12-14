@@ -1907,7 +1907,18 @@ def build_eqtl_index(
         print("Tidying up...")
         os.remove(table_fp)
 
-def query(url, content_type=None):
+def get_xml_header(text):
+    while text:
+        text = text.lstrip()
+        if text[0:5] == "<?xml" or text[0:9] == "<!DOCTYPE":
+            text = text[text.find(">")+1:]
+            continue
+        if text[0:4] == "<!--":
+            return text[4:text.find("-->")].strip()
+        break
+    return None
+
+def query(url, return_xml_header=False):
     """Send request to specified URL"""
     while True:
         try:
@@ -1925,8 +1936,7 @@ def query(url, content_type=None):
             logging.error("General Error: %s", url)
             return None
 
-    if not content_type:
-       content_type = response.headers["content-type"].split(";")[0]
+    content_type = response.headers["content-type"].split(";")[0]
 
     if content_type == "application/json":
         try:
@@ -1935,11 +1945,19 @@ def query(url, content_type=None):
             logging.error("Invalid JSON content: %s", url)
             return None
 
-    elif content_type == "application/xml":
+    elif content_type == "application/xml" or content_type == "text/xml":
         try:
-            return lxml.etree.fromstring(response.text)
+            content = lxml.etree.fromstring(response.text)
         except lxml.etree.LxmlSyntaxError:
             logging.error("Invalid XML content: %s", url)
+            content = None
+        if content is not None and return_xml_header:
+            return get_xml_header(response.text), content
+        elif content is not None:
+            return content
+        elif return_xml_header:
+            return None, None
+        else:
             return None
 
     elif content_type == "text/html":
@@ -1947,13 +1965,6 @@ def query(url, content_type=None):
             return lxml.html.fromstring(response.text)
         except lxml.html.LxmlSyntaxError:
             logging.error("Invalid HTML content: %s", url)
-            return None
-
-    elif content_type == "text/xml":
-        try:
-            return lxml.etree.fromstring(response.text)
-        except lxml.etree.LxmlSyntaxError:
-            logging.error("Invalid XML content: %s", url)
             return None
 
     elif content_type == "text/plain":
@@ -2008,7 +2019,8 @@ def kegg(gene):
                 pathway_name = pathway_name.strip()
                 break
 
-        response = query("{}/get/{}/kgml".format(kegg_api_url, pathway_id))
+        header_comment, response =\
+            query("{}/get/{}/kgml".format(kegg_api_url, pathway_id), True)
 
         if response is None:
             continue
@@ -2066,21 +2078,6 @@ def kegg(gene):
         upstream_genes = sorted(list(upstream_genes))
         downstream_genes = sorted(list(downstream_genes))
 
-        response = query("{}/get/{}/kgml".format(kegg_api_url, pathway_id),
-                         "text/plain")
-
-        header_comment = None
-
-        while response:
-            response = response.lstrip()
-            if (response[0:5] == "<?xml" or
-                    response[0:9] == "<!DOCTYPE"):
-                response = response[response.find(">")+1:]
-                continue
-            if response[0:4] == "<!--":
-                header_comment = response[4:response.find("-->")].strip()
-            break
-
         months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul",
                   "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -2088,16 +2085,13 @@ def kegg(gene):
                 "Creation date: " in header_comment and
                 len(header_comment.split(" ")) > 4 and
                 header_comment.split(" ")[2] in months):
-
             header_comment = header_comment.split(" ")
             month = str(months.index(header_comment[2]) + 1)
             day = header_comment[3].replace(",", "")
             year = header_comment[4]
             pathway_version = "-".join([year, month, day])
-
         else:
             pathway_version = "NA"
-
 
         pathways.add((unicode(gene, "utf-8"),
                       unicode("KEGG", "utf-8"),
@@ -2462,15 +2456,13 @@ def build_pathway_db(
     log_reactome_release()
     log_wikipathways_release()
 
-    queried_genes = set()
-    upstream_genes = set()
-    downstream_genes = set()
-
+    genes = []
+    up_down_stream_genes = []
     num_queried_genes = 0
     with open(hgnc_gene_id_fp, "r") as hgnc_gene_file:
         for line in hgnc_gene_file:
             gene = line.strip()
-            if not gene:
+            if not gene or gene in genes:
                 continue
             for database in (kegg, reactome, wikipathways):
                 for pathway in database(gene):
@@ -2485,7 +2477,8 @@ def build_pathway_db(
                         """, (pathway[1], pathway[2], pathway[4]))
 
                     for upstream_gene in pathway[5]:
-                        upstream_genes.add(upstream_gene)
+                        if upstream_gene not in up_down_stream_genes:
+                            up_down_stream_genes.append(upstream_gene)
                         pathway_db_cursor.execute("""
                             INSERT INTO upstream
                             VALUES (?, ?, ?, ?)
@@ -2493,7 +2486,8 @@ def build_pathway_db(
                                   upstream_gene))
 
                     for downstream_gene in pathway[6]:
-                        downstream_genes.add(downstream_gene)
+                        if downstream_gene not in up_down_stream_genes:
+                            up_down_stream_genes.append(downstream_gene)
                         pathway_db_cursor.execute("""
                             INSERT INTO downstream
                             VALUES (?, ?, ?, ?)
@@ -2512,11 +2506,10 @@ def build_pathway_db(
 
                     tab_writer.writerow(pathway[:5] + (upstream, downstream))
 
-            queried_genes.add(gene)
+            genes.append(gene)
             num_queried_genes += 1
             gene_num_bar.update(num_queried_genes)
 
-    unqueried_genes = (upstream_genes | downstream_genes) - queried_genes
 
     pathway_db.commit()
     pathway_db.close()
