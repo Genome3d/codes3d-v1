@@ -2059,8 +2059,8 @@ def kegg(gene):
         if not (upstream_gene_ids or downstream_gene_ids):
             continue
 
-        genes = "+".join(list(upstream_gene_ids | downstream_gene_ids))
-        response = query("{}/list/{}".format(kegg_api_url, genes))
+        genes_str = "+".join(list(upstream_gene_ids | downstream_gene_ids))
+        response = query("{}/list/{}".format(kegg_api_url, genes_str))
 
         if response is None:
             continue
