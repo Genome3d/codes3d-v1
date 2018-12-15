@@ -1913,10 +1913,10 @@ def get_xml_header(text):
         if text[0:5] == "<?xml" or text[0:9] == "<!DOCTYPE":
             text = text[text.find(">")+1:]
             continue
-        if text[0:4] == "<!--":
+        elif text[0:4] == "<!--":
             return text[4:text.find("-->")].strip()
-        break
-    return None
+        else:
+            return None
 
 def query(url, return_xml_header=False):
     """Send request to specified URL"""
@@ -2081,7 +2081,7 @@ def kegg(gene):
         months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul",
                   "Aug", "Sep", "Oct", "Nov", "Dec"]
 
-        if (header_comment and
+        if (header_comment is not None and
                 "Creation date: " in header_comment and
                 len(header_comment.split(" ")) > 4 and
                 header_comment.split(" ")[2] in months):
@@ -2214,6 +2214,8 @@ def wikipathways(gene, exclude_reactome=True):
     """Query WikiPathways for HGNC-Gene-ID"""
     reactome_reference_suffix = "reactome.org/PathwayBrowser/#DIAGRAM="
     wikipathways_api_url = "https://webservice.wikipathways.org"
+    nsmap = {"ns1": "http://www.wso2.org/php/xsd",
+             "ns2": "http://www.wikipathways.org/webservice"}
 
     response = query(
         "{}/findPathwaysByText?query={}&species=Homo_sapiens".format(
@@ -2223,11 +2225,11 @@ def wikipathways(gene, exclude_reactome=True):
         return []
 
     pathways = []
-    for result in response.findall("ns1:result", response.nsmap):
+    for result in response.findall("ns1:result", nsmap):
         pathway = {}
-        pathway["id"] = result.find("ns2:id", response.nsmap).text
-        pathway["revision"] = result.find("ns2:revision", response.nsmap).text
-        pathway["name"] = result.find("ns2:name", response.nsmap).text
+        pathway["id"] = result.find("ns2:id", nsmap).text
+        pathway["revision"] = result.find("ns2:revision", nsmap).text
+        pathway["name"] = result.find("ns2:name", nsmap).text
         pathways.append(pathway)
 
     response = query("{}/findInteractions?query={}".format(
@@ -2239,16 +2241,16 @@ def wikipathways(gene, exclude_reactome=True):
     interactions = {pathway["id"]: {"left": set(), "right": set()}
                     for pathway in pathways}
 
-    for result in response.findall("ns1:result", response.nsmap):
-        species = result.find("ns2:species", response.nsmap).text
+    for result in response.findall("ns1:result", nsmap):
+        species = result.find("ns2:species", nsmap).text
         if species == "Homo sapiens":
-            pathway_id = result.find("ns2:id", response.nsmap).text
-            for field in result.findall("ns2:fields", response.nsmap):
-                name = field.find("ns2:name", response.nsmap).text
+            pathway_id = result.find("ns2:id", nsmap).text
+            for field in result.findall("ns2:fields", nsmap):
+                name = field.find("ns2:name", nsmap).text
                 if name not in ("left", "right"):
                     continue
                 values = set()
-                for value in field.findall("ns2:values", response.nsmap):
+                for value in field.findall("ns2:values", nsmap):
                     if value.text and len(value.text.split(" ")) == 1:
                         values.add(value.text.upper())
                 if gene.upper() in values:
@@ -2285,12 +2287,11 @@ def wikipathways(gene, exclude_reactome=True):
         if response is None:
             continue
 
-        for tag in response.findall("ns1:tags", response.nsmap):
-            if (tag.find("ns2:name", response.nsmap).text ==
+        for tag in response.findall("ns1:tags", nsmap):
+            if (tag.find("ns2:name", nsmap).text ==
                     "Curation:Reactome_Approved"):
                 pathways.remove(pathway)
                 break
-
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
@@ -2462,8 +2463,14 @@ def build_pathway_db(
     with open(hgnc_gene_id_fp, "r") as hgnc_gene_file:
         for line in hgnc_gene_file:
             gene = line.strip()
+
             if not gene or gene in genes:
                 continue
+
+            genes.append(gene)
+            num_queried_genes += 1
+            gene_num_bar.update(num_queried_genes)
+
             for database in (kegg, reactome, wikipathways):
                 for pathway in database(gene):
                     pathway_db_cursor.execute("""
@@ -2505,11 +2512,6 @@ def build_pathway_db(
                         downstream = "NA"
 
                     tab_writer.writerow(pathway[:5] + (upstream, downstream))
-
-            genes.append(gene)
-            num_queried_genes += 1
-            gene_num_bar.update(num_queried_genes)
-
 
     pathway_db.commit()
     pathway_db.close()
