@@ -2216,6 +2216,8 @@ def wikipathways(gene, exclude_reactome=True):
     wikipathways_api_url = "https://webservice.wikipathways.org"
     nsmap = {"ns1": "http://www.wso2.org/php/xsd",
              "ns2": "http://www.wikipathways.org/webservice"}
+    metabolites = {
+            "CA++", "CA2+", "CL-", "H+", "H2O", "H2O2", "O2", "K+", "NA+"}
 
     response = query(
         "{}/findPathwaysByText?query={}&species=Homo_sapiens".format(
@@ -2247,15 +2249,15 @@ def wikipathways(gene, exclude_reactome=True):
             pathway_id = result.find("ns2:id", nsmap).text
             for field in result.findall("ns2:fields", nsmap):
                 name = field.find("ns2:name", nsmap).text
-                if name not in ("left", "right"):
-                    continue
-                values = set()
-                for value in field.findall("ns2:values", nsmap):
-                    if value.text and len(value.text.split(" ")) == 1:
-                        values.add(value.text.upper())
-                if gene.upper() in values:
-                    continue
-                interactions[pathway_id][name] |= values
+                if name in ("left", "right"):
+                    values = set()
+                    for value in field.findall("ns2:values", nsmap):
+                        if value.text and len(value.text.split(" ")) == 1:
+                            values.add(value.text.upper())
+                    if gene.upper() in values:
+                        continue
+                    values -= metabolites
+                    interactions[pathway_id][name] |= values
 
     for pathway_id in interactions:
         interactions[pathway_id]["left"] =\
@@ -2309,6 +2311,8 @@ def log_kegg_release():
         release = release.strip("+")
         logging.info("KEGG version: %s", release)
 
+    return None
+
 def log_reactome_release():
     """Write Reactome release information to log file"""
     reactome_info_url =\
@@ -2316,6 +2320,8 @@ def log_reactome_release():
 
     release = query(reactome_info_url)
     logging.info("Reactome version: %s", release)
+
+    return None
 
 def log_wikipathways_release():
     """Write WikiPathways release information to log file"""
@@ -2333,17 +2339,50 @@ def log_wikipathways_release():
         release = "-".join([release[0:4], release[4:6], release[6:8]])
         logging.info("WikiPathways version: %s", release)
 
+    return None
+
+def build_expression_table(
+        pathway_db_cursor,
+        pathway_db_tsv_exp_fp,
+        pathway_db_gene_map_fp,
+        pathway_db_exp_fp):
+
+    """Build protein expression table for pathway.db"""
+
+    pass
+
+    return None
+
+
 def build_pathway_db(
-        hgnc_gene_id_fp,
+        hgnc_gene_sym_fp,
         pathway_db_fp,
         pathway_db_tmp_fp,
-        pathway_db_tab_fp,
-        pathway_db_log_fp):
-    """Build pathway database"""
+        pathway_db_tsv_exp_fp,
+        pathway_db_tsv_pw_fp,
+        pathway_db_log_fp,
+        pathway_db_gene_map_fp,
+        pathway_db_exp_fp):
+
+    """Build pathway.db"""
+
+    logging.getLogger("requests").setLevel(logging.CRITICAL)
+    logging.basicConfig(
+        filename=pathway_db_log_fp,
+        filemode="w",
+        level=logging.INFO,
+        format="%(levelname)s\t%(asctime)s\t%(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S")
+
+    pathway_db = sqlite3.connect(pathway_db_tmp_fp)
+    pathway_db_cursor = pathway_db.cursor()
+
+    build_expression_table(pathway_db_cursor, pathway_db_tsv_exp_fp,
+                           pathway_db_gene_map_fp, pathway_db_exp_fp)
 
     num_genes = 0
     genes = []
-    with open(hgnc_gene_id_fp, "r") as hgnc_gene_file:
+    with open(hgnc_gene_sym_fp, "r") as hgnc_gene_file:
         for gene in hgnc_gene_file:
                 gene = gene.strip()
                 if gene and gene not in genes:
@@ -2354,27 +2393,16 @@ def build_pathway_db(
         gene_num_bar = progressbar.ProgressBar(max_value=num_genes)
         gene_num_bar.update(0)
 
-    logging.getLogger("requests").setLevel(logging.CRITICAL)
-    logging.basicConfig(
-        filename=pathway_db_log_fp,
-        filemode="w",
-        level=logging.INFO,
-        format="%(levelname)s\t%(asctime)s\t%(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S")
-
-    tab_file = open(pathway_db_tab_fp, "w", buffering=1)
-    tab_writer = csv.writer(tab_file, delimiter="\t", lineterminator="\n")
-    tab_header = ["Gene",
+    tsv_file = open(pathway_db_tsv_pw_fp, "w", buffering=1)
+    tsv_writer = csv.writer(tsv_file, delimiter="\t", lineterminator="\n")
+    tsv_header = ["Gene",
                   "Database",
                   "Pathway_ID",
                   "Pathway_Version",
                   "Pathway",
                   "Upstream_Genes",
                   "Downstream_Genes"]
-    tab_writer.writerow(tab_header)
-
-    pathway_db = sqlite3.connect(pathway_db_tmp_fp)
-    pathway_db_cursor = pathway_db.cursor()
+    tsv_writer.writerow(tsv_header)
 
     pathway_db_cursor.execute("""
         DROP TABLE IF EXISTS genes
@@ -2441,8 +2469,9 @@ def build_pathway_db(
         """)
 
     logging.info("Build started.")
-    logging.info("File name during build: %s", pathway_db_tmp_fp)
-    logging.info("HGNC source: %s", hgnc_gene_id_fp)
+    logging.info("Temporary file position during build: %s", pathway_db_tmp_fp)
+    logging.info("HGNC Gene Symbol source: %s", hgnc_gene_sym_fp)
+
     log_kegg_release()
     log_reactome_release()
     log_wikipathways_release()
@@ -2479,7 +2508,7 @@ def build_pathway_db(
                         """, (pathway[1], pathway[2], pathway[0],
                               downstream_gene))
 
-                to_file = [entry.encode("utf-8") for entry in pathway[:5]]
+                tsv_line = [entry.encode("utf-8") for entry in pathway[:5]]
 
                 if pathway[5]:
                     upstream = ", ".join(
@@ -2493,19 +2522,22 @@ def build_pathway_db(
                 else:
                     downstream = "NA"
 
-                to_file.extend([upstream, downstream])
-                tab_writer.writerow(to_file)
+                tsv_line.extend([upstream, downstream])
+                tsv_writer.writerow(tsv_line)
 
         num_queried_genes += 1
         gene_num_bar.update(num_queried_genes)
 
     pathway_db.commit()
     pathway_db.close()
-    tab_file.close()
+    tsv_file.close()
 
     os.rename(pathway_db_tmp_fp, pathway_db_fp)
     logging.info("Renamed %s to %s.", pathway_db_tmp_fp, pathway_db_fp)
     logging.info("Build completed.")
+    logging.shutdown()
+
+    return None
 
 def parse_summary_file(
         summary_file,

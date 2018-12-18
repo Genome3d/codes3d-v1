@@ -18,21 +18,34 @@ if __name__ == "__main__":
     config = configparser.ConfigParser()
     config.read(args.config)
 
-    hgnc_gene_id_fp = os.path.join(os.path.dirname(__file__),
-                                   config.get("Defaults", "gene_id_fp"))
+    hgnc_gene_sym_fp = os.path.join(os.path.dirname(__file__),
+                                    config.get("Defaults",
+                                               "pathway_db_gene_sym_fp"))
     pathway_db_fp = os.path.join(os.path.dirname(__file__),
                                  config.get("Defaults", "pathway_db_fp"))
     pathway_db_tmp_fp = os.path.join(os.path.dirname(__file__),
                                      config.get("Defaults",
                                                 "pathway_db_tmp_fp"))
-    pathway_db_tab_fp = os.path.join(os.path.dirname(__file__),
-                                     config.get("Defaults",
-                                                "pathway_db_tab_fp"))
+    pathway_db_tsv_exp_fp = os.path.join(os.path.dirname(__file__),
+                                         config.get("Defaults",
+                                                    "pathway_db_tsv_exp_fp"))
+    pathway_db_tsv_pw_fp = os.path.join(os.path.dirname(__file__),
+                                        config.get("Defaults",
+                                                   "pathway_db_tsv_pw_fp"))
     pathway_db_log_fp = os.path.join(os.path.dirname(__file__),
                                      config.get("Defaults",
                                                 "pathway_db_log_fp"))
+    pathway_db_gene_map_fp = os.path.join(os.path.dirname(__file__),
+                                          config.get("Defaults",
+                                                     "pathway_db_gene_map_fp"))
+    pathway_db_exp_fp = os.path.join(os.path.dirname(__file__),
+                                          config.get("Defaults",
+                                                     "pathway_db_exp_fp"))
 
-    codes3d.build_pathway_db(hgnc_gene_id_fp, pathway_db_fp, pathway_db_tmp_fp,
-                             pathway_db_tab_fp, pathway_db_log_fp)
+    codes3d.build_pathway_db(hgnc_gene_sym_fp, pathway_db_fp, pathway_db_tmp_fp,
+                             pathway_db_tsv_exp_fp, pathway_db_tsv_pw_fp,
+                             pathway_db_log_fp, pathway_db_gene_map_fp,
+                             pathway_db_exp_fp)
+
 
 
