@@ -2342,14 +2342,108 @@ def log_wikipathways_release():
     return None
 
 def build_expression_table(
+        pathway_db,
         pathway_db_cursor,
         pathway_db_tsv_exp_fp,
         pathway_db_gene_map_fp,
-        pathway_db_exp_fp):
+        pathway_db_exp_fp,
+        genes_from_file):
 
     """Build protein expression table for pathway.db"""
 
-    pass
+    logging.info("Building expression table from: %s", pathway_db_exp_fp)
+    logging.info("Peptide-gene mappings from: %s", pathway_db_gene_map_fp)
+    genes = set(genes_from_file)
+    accessions = {}
+    with open(pathway_db_gene_map_fp, "r") as gene_map_file:
+        gene_map_reader = csv.reader(gene_map_file)
+        next(gene_map_reader)
+        for line in gene_map_reader:
+            for gene in line[3].split(";"):
+                if gene not in genes:
+                    continue
+                if gene not in accessions:
+                    accessions[gene] = set()
+                accessions[gene] |= set([accession.split("|")[1]
+                                        for accession in line[2].split(";")])
+
+    num_genes = len(accessions)
+    gene_num = progressbar.ProgressBar(max_value=num_genes)
+    gene_num.update(0)
+
+    acc_exp = {}
+    with open(pathway_db_exp_fp, "r") as exp_file:
+        exp_reader = csv.reader(exp_file)
+        header = next(exp_reader)
+        tissues = [column.replace("Adult ", "") for column in header
+                   if column.startswith("Adult ")]
+        num_tissues = len(tissues)
+        for line in exp_reader:
+            accession = line[0]
+            acc_exp[accession] = {}
+            for column in range(len(header)):
+                if header[column].startswith("Adult "):
+                    tissue = header[column].replace("Adult ", "")
+                    acc_exp[accession][tissue] = float(line[column])
+
+    tsv_file = open(pathway_db_tsv_exp_fp, "w", buffering=1)
+    tsv_writer = csv.writer(tsv_file, delimiter="\t", lineterminator="\n")
+    tsv_header = ["Gene",
+                  "Tissue",
+                  "Expression Level",
+                  "Standardized Expression Level",
+                  "Significance"]
+    tsv_writer.writerow(tsv_header)
+
+    pathway_db_cursor.execute("""
+        DROP TABLE IF EXISTS expression
+        """)
+
+    pathway_db_cursor.execute("""
+        CREATE TABLE expression (
+            gene TEXT,
+            tissue TEXT,
+            expression REAL,
+            z_score REAL,
+            significance REAL,
+            PRIMARY KEY (
+                gene,
+                tissue)
+            ON CONFLICT IGNORE)
+            """)
+
+    for i, gene in enumerate(accessions, 1):
+        num_acc = len(accessions[gene])
+        exp = {tissue: sum([acc_exp[accession][tissue]])/num_acc
+               for accession in accessions[gene]
+               for tissue in tissues}
+
+        mean = sum([exp[tissue] for tissue in tissues])/num_tissues
+        sdv = math.sqrt(sum([(exp[tissue] - mean)**2
+                              for tissue in tissues])/(num_tissues - 1))
+        if sdv == 0.0:
+            exp_z = {tissue: 0.0 for tissue in tissues}
+        else:
+            exp_z = {tissue: (exp[tissue] - mean) / sdv
+                          for tissue in tissues}
+
+        exp_sig = {tissue: 1 - st.norm.cdf(exp_z[tissue])
+                   for tissue in tissues}
+
+        for tissue in tissues:
+            entry = (gene, tissue, exp[tissue], exp_z[tissue], exp_sig[tissue])
+            pathway_db_cursor.execute("""
+                INSERT INTO expression
+                VALUES (?, ?, ?, ?, ?)
+            """, entry)
+
+            tsv_writer.writerow(entry)
+
+        gene_num.update(i)
+
+    pathway_db.commit()
+    logging.info("Expression table completed.")
+    tsv_file.close()
 
     return None
 
@@ -2377,21 +2471,25 @@ def build_pathway_db(
     pathway_db = sqlite3.connect(pathway_db_tmp_fp)
     pathway_db_cursor = pathway_db.cursor()
 
-    build_expression_table(pathway_db_cursor, pathway_db_tsv_exp_fp,
-                           pathway_db_gene_map_fp, pathway_db_exp_fp)
+    logging.info("Build started.")
+    logging.info("Temporary file position during build: %s", pathway_db_tmp_fp)
 
-    num_genes = 0
+    logging.info("HGNC Gene Symbols from: %s", hgnc_gene_sym_fp)
     genes = []
     with open(hgnc_gene_sym_fp, "r") as hgnc_gene_file:
         for gene in hgnc_gene_file:
                 gene = gene.strip()
                 if gene and gene not in genes:
                     genes.append(gene)
-                    num_genes += 1
 
-    if num_genes:
-        gene_num_bar = progressbar.ProgressBar(max_value=num_genes)
-        gene_num_bar.update(0)
+
+    build_expression_table(pathway_db, pathway_db_cursor,
+                           pathway_db_tsv_exp_fp, pathway_db_gene_map_fp,
+                           pathway_db_exp_fp, genes)
+
+    num_genes = len(genes)
+    gene_num = progressbar.ProgressBar(max_value=num_genes)
+    gene_num.update(0)
 
     tsv_file = open(pathway_db_tsv_pw_fp, "w", buffering=1)
     tsv_writer = csv.writer(tsv_file, delimiter="\t", lineterminator="\n")
@@ -2415,9 +2513,6 @@ def build_pathway_db(
         """)
     pathway_db_cursor.execute("""
         DROP TABLE IF EXISTS downstream
-        """)
-    pathway_db_cursor.execute("""
-        DROP TABLE IF EXISTS expression
         """)
 
     pathway_db_cursor.execute("""
@@ -2468,18 +2563,11 @@ def build_pathway_db(
             ON CONFLICT IGNORE)
         """)
 
-    logging.info("Build started.")
-    logging.info("Temporary file position during build: %s", pathway_db_tmp_fp)
-    logging.info("HGNC Gene Symbol source: %s", hgnc_gene_sym_fp)
-
     log_kegg_release()
     log_reactome_release()
     log_wikipathways_release()
 
-    up_down_stream_genes = {}
-    num_queried_genes = 0
-    for gene in genes:
-        up_down_stream_genes[gene] = []
+    for i, gene in enumerate(genes, 1):
         for database in (kegg, reactome, wikipathways):
             for pathway in database(gene):
                 pathway_db_cursor.execute("""
@@ -2492,21 +2580,32 @@ def build_pathway_db(
                     VALUES (?, ?, ?)
                     """, (pathway[1], pathway[2], pathway[4]))
 
-                for upstream_gene in pathway[5]:
-                    up_down_stream_genes[gene].append(upstream_gene)
+                if pathway[5]:
+                    for upstream_gene in pathway[5]:
+                        pathway_db_cursor.execute("""
+                            INSERT INTO upstream
+                            VALUES (?, ?, ?, ?)
+                            """, (pathway[1], pathway[2], pathway[0],
+                                  upstream_gene))
+                else:
                     pathway_db_cursor.execute("""
                         INSERT INTO upstream
                         VALUES (?, ?, ?, ?)
-                        """, (pathway[1], pathway[2], pathway[0],
-                              upstream_gene))
+                        """, (pathway[1], pathway[2], pathway[0], None))
 
-                for downstream_gene in pathway[6]:
-                    up_down_stream_genes[gene].append(downstream_gene)
+                if pathway[6]:
+                    for downstream_gene in pathway[6]:
+                        pathway_db_cursor.execute("""
+                            INSERT INTO downstream
+                            VALUES (?, ?, ?, ?)
+                            """, (pathway[1], pathway[2], pathway[0],
+                                  downstream_gene))
+
+                else:
                     pathway_db_cursor.execute("""
                         INSERT INTO downstream
                         VALUES (?, ?, ?, ?)
-                        """, (pathway[1], pathway[2], pathway[0],
-                              downstream_gene))
+                        """, (pathway[1], pathway[2], pathway[0], None))
 
                 tsv_line = [entry.encode("utf-8") for entry in pathway[:5]]
 
@@ -2525,15 +2624,14 @@ def build_pathway_db(
                 tsv_line.extend([upstream, downstream])
                 tsv_writer.writerow(tsv_line)
 
-        num_queried_genes += 1
-        gene_num_bar.update(num_queried_genes)
+        gene_num.update(i)
 
     pathway_db.commit()
     pathway_db.close()
     tsv_file.close()
 
     os.rename(pathway_db_tmp_fp, pathway_db_fp)
-    logging.info("Renamed %s to %s.", pathway_db_tmp_fp, pathway_db_fp)
+    logging.info("Renamed %s: %s.", pathway_db_tmp_fp, pathway_db_fp)
     logging.info("Build completed.")
     logging.shutdown()
 
@@ -2543,15 +2641,7 @@ def parse_summary_file(
         summary_file,
         buffer_size):
 
-    print("Parsing input file...")
-    genes = set()
-    with open(summary_file, buffering=buffer_size) as summary:
-        next(summary)
-        for line in [line.split("\t") for line in summary]:
-            gene = line[3]
-            genes.add(gene)
-
-    return list(genes)
+    pass
 
 def produce_pathway_summary(
         genes,
