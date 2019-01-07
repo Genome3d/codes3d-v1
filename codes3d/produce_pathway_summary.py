@@ -31,13 +31,13 @@ if __name__ == "__main__":
             help="Buffer size applied to file output during compilation "+\
             " (default: 1048576).")
     parser.add_argument(
-            "-t", "--num_processes_summary", type=int,
+            "-r", "--num_processes_summary", type=int,
             default=min(psutil.cpu_count(), 32),
             help="The number of processes for compilation of the results " +\
             "(default: %s)." % str(min(psutil.cpu_count(), 32)))
     parser.add_argument("-e", "--significant_expression", type=float,
             default=0.05,
-            help="P-value of significant expression variation "+\
+            help="p-value of significant expression variation "+\
             "(default: 0.05).")
 
     args = parser.parse_args()
@@ -48,11 +48,11 @@ if __name__ == "__main__":
     if not os.path.isdir(args.output_dir):
 	    print('\tCreating output directory...')
 	    os.mkdir(args.output_dir)
-    all_genes = codes3d.parse_summary_file(args.summary_file,
-                                          args.buffer_size_in)
-    codes3d.produce_pathway_summary(all_genes,
-                                    pathway_db_fp, args.output_dir,
-                                    args.buffer_size_out,
-                                    args.num_processes_summary,
-                                    args.significant_expression)
+
+    gene_ids = codes3d.parse_summary_file(args.summary_file,
+        args.buffer_size_in)
+
+    codes3d.produce_pathway_summary(gene_ids, pathway_db_fp, args.output_dir,
+        args.buffer_size_out, args.num_processes_summary,
+        args.significant_expression)
 
