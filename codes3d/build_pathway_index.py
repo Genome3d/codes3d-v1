@@ -48,9 +48,9 @@ if __name__ == "__main__":
                                           config.get("Defaults",
                                                      "pathway_db_exp_prot_fp"))
 
-    codes3d.build_pathway_db(hgnc_gene_sym_fp, pathway_db_fp, pathway_db_tmp_fp,
+    codes3d.build_pathway_db(pathway_db_fp, pathway_db_tmp_fp,
                              pathway_db_tsv_exp_fp, pathway_db_tsv_pw_fp,
                              pathway_db_log_fp, pathway_db_gene_map_fp,
-                             pathway_db_exp_gene_fp, pathway_db_exp_prot_fp,
-                             pathway_db_exp_pept_fp)
+                             pathway_db_exp_gene_fp, pathway_db_exp_pept_fp,
+                             pathway_db_exp_prot_fp, hgnc_gene_sym_fp)
 
