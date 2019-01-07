@@ -1044,40 +1044,44 @@ def produce_summary(
     GENE_DF = pandas.read_table(expression_table_fp, index_col="Description",
                                 engine='c', compression=None, memory_map=True)
 
-    all_snps = genes.keys()
-    all_genes = gene_exp.keys()
-    all_tissues = list(GENE_DF)
+    snps = genes.keys()
+    gene_ids = gene_exp.keys()
+    tissues = list(GENE_DF)
 
     genes_tissues = [(gene, tissue)
-                     for gene in all_genes
-                     for tissue in all_tissues]
-    snps_genes = [(snp, gene) for snp in all_snps for gene in all_genes]
+                     for gene in gene_ids
+                     for tissue in tissues]
+    snps_genes = [(snp, gene) for snp in snps for gene in gene_ids]
 
     current_process = psutil.Process()
-    pool = multiprocessing.Pool(
-            processes=min(num_processes, len(current_process.cpu_affinity())))
+    num_processes = min(num_processes, len(current_process.cpu_affinity()))
+    pool = multiprocessing.Pool(processes=num_processes)
 
-    print("\n\tCollecting gene expression rates...")
+    print("\n\tMultiprocessing utilizing {} processes:".format(num_processes))
+
+    print("\tCollecting gene expression rates [|{}|]...".format(
+          len(genes_tissues)))
     expression = pool.map(get_expression, genes_tissues)
     del GENE_DF
 
     for i in range(len(genes_tissues)):
         gene_exp[genes_tissues[i][0]][genes_tissues[i][1]] = expression[i][0]
 
-    print("\tDetermining gene expression extremes...")
+    print("\tDetermining gene expression extremes [|{}|]...".format(
+          len(gene_ids)))
     extremes = pool.map(get_expression_extremes, [gene_exp[gene]
-                                                  for gene in all_genes])
+                                                  for gene in gene_ids])
 
-    for i in range(len(all_genes)):
-        gene_exp[all_genes[i]]['max_tissue'] = extremes[i][0]
-        gene_exp[all_genes[i]]['max_rate'] = extremes[i][1]
-        gene_exp[all_genes[i]]['min_tissue'] = extremes[i][2]
-        gene_exp[all_genes[i]]['min_rate'] = extremes[i][3]
+    for i in range(len(gene_ids)):
+        gene_exp[gene_ids[i]]['max_tissue'] = extremes[i][0]
+        gene_exp[gene_ids[i]]['max_rate'] = extremes[i][1]
+        gene_exp[gene_ids[i]]['min_tissue'] = extremes[i][2]
+        gene_exp[gene_ids[i]]['min_rate'] = extremes[i][3]
 
     for i in range(len(genes_tissues)):
         gene_exp[genes_tissues[i][0]][genes_tissues[i][1]] = expression[i][1]
 
-    print("\tComputing HiC data...")
+    print("\tComputing HiC data [|{}|]...".format(len(snps_genes)))
     hic_data = pool.map(calc_hic_contacts, [genes[snp][gene]
                                             for snp, gene in snps_genes])
 
@@ -1121,7 +1125,7 @@ def produce_summary(
     summary.close()
     sig_file.close()
 
-    return all_genes
+    return gene_ids
 
 def compute_adj_pvalues(p_values):
     """ A Benjamini-Hochberg adjustment of p values of SNP-gene eQTL
@@ -2451,6 +2455,7 @@ def build_expression_tables(
 
     num_genes = len(gene_exp)
     if num_genes:
+        print("Collecting expression infomation for each available gene...")
         gene_num = progressbar.ProgressBar(max_value=num_genes)
         gene_num.update(0)
 
@@ -2652,6 +2657,7 @@ def build_expression_tables(
 
 
 def build_pathway_db(
+        config_fp,
         pathway_db_fp,
         pathway_db_tmp_fp,
         pathway_db_tsv_exp_fp,
@@ -2677,6 +2683,7 @@ def build_pathway_db(
     pathway_db_cursor = pathway_db.cursor()
 
     logging.info("Build started.")
+    logging.info("Configuration file: %s", config_fp)
     logging.info("Temporary file position during build: %s", pathway_db_tmp_fp)
 
     logging.info("HGNC Gene Symbols from: %s", hgnc_gene_sym_fp)
@@ -2689,6 +2696,7 @@ def build_pathway_db(
 
     num_genes = len(input_genes)
     if num_genes:
+        print("Collecting pathway information for each gene...")
         input_gene_num = progressbar.ProgressBar(max_value=num_genes)
         input_gene_num.update(0)
 
@@ -2851,10 +2859,17 @@ def build_pathway_db(
     return None
 
 def parse_summary_file(
-        summary_file,
+        summary_file_fp,
         buffer_size):
 
-    pass
+    gene_ids = set()
+    with open(summary_file_fp, "r", buffering=buffer_size) as summary_file:
+        summary_reader = csv.reader(summary_file, delimiter="\t")
+        next(summary_reader)
+        for line in summary_reader:
+            gene_ids.add(line[3])
+
+    return list(gene_ids)
 
 def produce_pathway_summary(
         genes,
@@ -2910,11 +2925,16 @@ if __name__ == "__main__":
     parser.add_argument("-d","--buffer_size_out",type=int,default=1048576,
                         help="Buffer size applied to file output during " +\
                         "compilation (default: 1048576).")
-    parser.add_argument("-t", "--num_processes_summary", type=int,
+    parser.add_argument("-r", "--num_processes_summary", type=int,
                         default=min(psutil.cpu_count(), 32),
                         help="The number of processes for compilation of " +\
                         "results (default: %s)." %
                         str(min(psutil.cpu_count(), 32)))
+    parser.add_argument("-e", "--significant-expression", type=float,
+                        default=0.05,
+                        help="p-value of significant expression variation " +\
+                        "(default: 0.05).")
+
     args = parser.parse_args()
     config = configparser.ConfigParser()
     config.read(args.config)
@@ -2939,6 +2959,8 @@ if __name__ == "__main__":
                                        config.get("Defaults", "GENE_DICT_FP"))
     snp_dict_fp = os.path.join(os.path.dirname(__file__),
                                        config.get("Defaults", "SNP_DICT_FP"))
+    pathway_db_fp = os.path.join(os.path.dirname(__file__),
+                                       config.get("Defaults", "PATHWAY_DB_FP"))
     GTEX_CERT = os.path.join(os.path.dirname(__file__),
                              config.get("Defaults", "GTEX_CERT"))
     HIC_RESTRICTION_ENZYMES = [e.strip() for e in \
@@ -2964,8 +2986,11 @@ if __name__ == "__main__":
         args.fdr_threshold, args.local_databases_only,
         args.num_processes, args.output_dir, gene_dict_fp, snp_dict_fp,
         suppress_intermediate_files=args.suppress_intermediate_files)
-    produce_summary(
-         p_values, snps, genes, gene_database_fp, expression_table_fp,
-         args.fdr_threshold, args.output_dir, args.buffer_size_in,
-         args.buffer_size_out, args.num_processes_summary)
+    gene_ids = produce_summary(
+        p_values, snps, genes, gene_database_fp, expression_table_fp,
+        args.fdr_threshold, args.output_dir, args.buffer_size_in,
+        args.buffer_size_out, args.num_processes_summary)
+    produce_pathway_summary(gene_ids, pathway_db_fp, args.output_dir,
+        args.buffer_size_out, args.num_processes_summary,
+        args.significant_expression)
 
