@@ -2428,17 +2428,19 @@ def build_expression_tables(
 
     """Build protein expression tables for pathway.db"""
 
-    logging.info("Building expression table from: %s", pathway_db_exp_fp)
+    logging.info("Building expression tables from: %s, %s, %s",
+                  pathway_db_exp_gene_fp, pathway_db_exp_pept_fp,
+                  pathway_db_exp_prot_fp)
     logging.info("Peptide-gene mappings from: %s", pathway_db_gene_map_fp)
 
     gene_exp = {}
     with open(pathway_db_exp_gene_fp, "r") as gene_exp_file:
-        gene_exp_reader = csv.reader(peptide_exp_file)
-        header = next(peptide_exp_reader)
+        gene_exp_reader = csv.reader(gene_exp_file)
+        header = next(gene_exp_reader)
         tissues = {i: header[i].replace("Adult ", "")
                    for i in range(len(header))
                    if header[i].startswith("Adult ")}
-        for line in peptide_exp_reader:
+        for line in gene_exp_reader:
             gene = line[0]
             if gene not in genes:
                 continue
@@ -2486,9 +2488,13 @@ def build_expression_tables(
 
     peptide_exp = {}
     for gene in accessions:
-        peptide_exp[gene] = {tissue: sum([exp[peptide][tissue]])
+        peptide_exp[gene] = {tissue: sum([peptides_exp[peptide][tissue]])
                              for peptide in peptides[gene]
                              for tissue in peptides_exp[peptide]}
+
+        # Compensation for incosistent tissue designation
+        peptide_exp[gene]["Adrenal"] = peptide_exp[gene]["Adrenal Gland"]
+        del peptide_exp[gene]["Adrenal Gland"]
 
     accession_exp = {}
     with open(pathway_db_exp_prot_fp, "r") as protein_exp_file:
@@ -2623,7 +2629,7 @@ def build_expression_tables(
                 VALUES (?, ?, ?, ?, ?)
                 """, entry)
 
-            tsv.writer.writerow([
+            tsv_writer.writerow([
                 gene,
                 tissue,
                 gene_exp[gene][tissue][0],
