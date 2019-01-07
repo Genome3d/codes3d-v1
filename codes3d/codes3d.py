@@ -2426,7 +2426,7 @@ def build_expression_tables(
         pathway_db_exp_prot_fp,
         genes):
 
-    """Build protein expression table for pathway.db"""
+    """Build protein expression tables for pathway.db"""
 
     logging.info("Building expression table from: %s", pathway_db_exp_fp)
     logging.info("Peptide-gene mappings from: %s", pathway_db_gene_map_fp)
@@ -2471,7 +2471,7 @@ def build_expression_tables(
                     peptides[gene] = set()
                 peptides[gene].add(line[0])
 
-    exp = {}
+    peptides_exp = {}
     with open(pathway_db_exp_pept_fp, "r") as peptide_exp_file:
         peptide_exp_reader = csv.reader(peptide_exp_file)
         header = next(peptide_exp_reader)
@@ -2480,15 +2480,15 @@ def build_expression_tables(
                    if header[i].startswith("Adult ")}
         for line in peptide_exp_reader:
             peptide = line[0]
-            exp[peptide] = {}
+            peptides_exp[peptide] = {}
             for i in tissues:
-                exp[peptide][tissues[i]] = float(line[i])
+                peptides_exp[peptide][tissues[i]] = float(line[i])
 
     peptide_exp = {}
     for gene in accessions:
         peptide_exp[gene] = {tissue: sum([exp[peptide][tissue]])
                              for peptide in peptides[gene]
-                             for tissue in exp[peptide]}
+                             for tissue in peptides_exp[peptide]}
 
     accession_exp = {}
     with open(pathway_db_exp_prot_fp, "r") as protein_exp_file:
