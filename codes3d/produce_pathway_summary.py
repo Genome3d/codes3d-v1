@@ -48,10 +48,10 @@ if __name__ == "__main__":
     if not os.path.isdir(args.output_dir):
 	    os.mkdir(args.output_dir)
 
-    gene_ids = codes3d.parse_summary_file(args.summary_file,
-        args.buffer_size_in)
+    genes, snps = codes3d.parse_summary_file(args.summary_file,
+                      args.buffer_size_in)
 
-    codes3d.produce_pathway_summary(gene_ids, pathway_db_fp, args.output_dir,
+    codes3d.produce_pathway_summary(genes, snps, pathway_db_fp, args.output_dir,
         args.buffer_size_out, args.num_processes_summary,
         args.significant_expression)
 
