@@ -1,3 +1,4 @@
+from __future__ import print_function, division
 from itertools import cycle
 import argparse
 import ast
@@ -2428,14 +2429,10 @@ def build_expression_tables(
         pathway_db_exp_gene_fp,
         pathway_db_exp_pept_fp,
         pathway_db_exp_prot_fp,
-        genes):
+        genes,
+        num_genes):
 
     """Build protein expression tables for pathway.db"""
-
-    logging.info("Building expression tables from: %s, %s, %s",
-                  pathway_db_exp_gene_fp, pathway_db_exp_pept_fp,
-                  pathway_db_exp_prot_fp)
-    logging.info("Peptide-gene mappings from: %s", pathway_db_gene_map_fp)
 
     gene_exp = {}
     with open(pathway_db_exp_gene_fp, "r") as gene_exp_file:
@@ -2453,11 +2450,18 @@ def build_expression_tables(
             for i in tissues:
                 gene_exp[gene][tissues[i]] = float(line[i])
 
-    num_genes = len(gene_exp)
+    num_genes_expr = len(gene_exp)
+    logging.info("Number of genes with expression information available: %s",
+                 num_genes_expr)
     if num_genes:
+        coverage = "{:.2f}%".format((num_genes_expr/num_genes)*100)
         print("Collecting expression infomation for each available gene...")
-        gene_num = progressbar.ProgressBar(max_value=num_genes)
+        gene_num = progressbar.ProgressBar(max_value=num_genes_expr)
         gene_num.update(0)
+    else:
+        coverage = "NA"
+    logging.info("Proportion of genes covered by expression data: %s",
+                 coverage)
 
     peptides = {}
     accessions = {}
@@ -2650,14 +2654,12 @@ def build_expression_tables(
         gene_num.update(i)
 
     pathway_db.commit()
-    logging.info("Expression tables completed.")
     tsv_file.close()
 
     return None
 
 
 def build_pathway_db(
-        config_fp,
         pathway_db_fp,
         pathway_db_tmp_fp,
         pathway_db_tsv_exp_fp,
@@ -2683,10 +2685,7 @@ def build_pathway_db(
     pathway_db_cursor = pathway_db.cursor()
 
     logging.info("Build started.")
-    logging.info("Configuration file: %s", config_fp)
-    logging.info("Temporary file position during build: %s", pathway_db_tmp_fp)
 
-    logging.info("HGNC Gene Symbols from: %s", hgnc_gene_sym_fp)
     input_genes = []
     with open(hgnc_gene_sym_fp, "r") as hgnc_gene_file:
         for gene in hgnc_gene_file:
@@ -2694,10 +2693,10 @@ def build_pathway_db(
                 if gene and gene not in input_genes:
                     input_genes.append(gene)
 
-    num_genes = len(input_genes)
-    if num_genes:
+    num_input_genes = len(input_genes)
+    if num_input_genes:
         print("Collecting pathway information for each gene...")
-        input_gene_num = progressbar.ProgressBar(max_value=num_genes)
+        input_gene_num = progressbar.ProgressBar(max_value=num_input_genes)
         input_gene_num.update(0)
 
     tsv_file = open(pathway_db_tsv_pw_fp, "w", buffering=1)
@@ -2776,6 +2775,7 @@ def build_pathway_db(
     log_reactome_release()
     log_wikipathways_release()
 
+    logging.info("Number of input genes: %s", num_input_genes)
     context_genes = set()
     for i, gene in enumerate(input_genes, 1):
         for database in (kegg, reactome, wikipathways):
@@ -2843,16 +2843,18 @@ def build_pathway_db(
     tsv_file.close()
 
     genes = context_genes | set(input_genes)
+    num_genes = len(genes)
+    logging.info("Number of genes including up- and downstream genes: %s",
+                 num_genes)
 
     build_expression_tables(pathway_db, pathway_db_cursor,
                             pathway_db_tsv_exp_fp, pathway_db_gene_map_fp,
                             pathway_db_exp_gene_fp, pathway_db_exp_pept_fp,
-                            pathway_db_exp_prot_fp, genes)
+                            pathway_db_exp_prot_fp, genes, num_genes)
 
     pathway_db.close()
 
     os.rename(pathway_db_tmp_fp, pathway_db_fp)
-    logging.info("Renamed %s: %s.", pathway_db_tmp_fp, pathway_db_fp)
     logging.info("Build completed.")
     logging.shutdown()
 
@@ -2879,7 +2881,8 @@ def produce_pathway_summary(
         num_processes,
         p_value):
 
-    pass
+    for gene in genes:
+        print(gene)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="")
