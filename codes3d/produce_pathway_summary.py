@@ -46,7 +46,6 @@ if __name__ == "__main__":
     pathway_db_fp = os.path.join(os.path.dirname(__file__),
                                  config.get("Defaults", "PATHWAY_DB_FP"))
     if not os.path.isdir(args.output_dir):
-	    print('\tCreating output directory...')
 	    os.mkdir(args.output_dir)
 
     gene_ids = codes3d.parse_summary_file(args.summary_file,
