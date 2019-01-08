@@ -1987,7 +1987,7 @@ def query(url, return_xml_header=False):
     elif content_type == "text/xml":
         try:
             content = lxml.etree.fromstring(response.text)
-        except lxml.etree.LxmlSyntaxError:
+        except lxml.etree.XMLSyntaxError:
             if "kgml" in url:
                 logging.error("Invalid KGML content: %s", url)
             else:
@@ -2006,7 +2006,7 @@ def query(url, return_xml_header=False):
     elif content_type == "text/html":
         try:
             return lxml.html.fromstring(response.text)
-        except lxml.html.LxmlSyntaxError:
+        except ValueError:
             logging.error("Invalid HTML content: %s", url)
             return None
 
@@ -2890,7 +2890,7 @@ def produce_pathway_summary(
         num_processes,
         p_value):
 
-    pass
+    return None
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="")
