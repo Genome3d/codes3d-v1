@@ -1127,7 +1127,7 @@ def produce_summary(
     summary.close()
     sig_file.close()
 
-    return gene_ids, {snp: genes[snp].keys() for snp in genes}
+    return {snp: genes[snp].keys() for snp in genes}
 
 
 def compute_adj_pvalues(p_values):
@@ -2423,6 +2423,28 @@ def log_wikipathways_release():
 
     return None
 
+def standardize(exp):
+    tissues = exp.keys()
+    num_tissues = len(tissues)
+
+    mean = sum([exp[tissue] for tissue in tissues])/num_tissues
+    sdv = math.sqrt(sum([(exp[tissue] - mean)**2
+                        for tissue in tissues])/(num_tissues - 1))
+    if sdv == 0.0:
+        exp_z = {tissue: 0.0 for tissue in tissues}
+    else:
+        exp_z = {tissue: (exp[tissue] - mean) / sdv
+                    for tissue in tissues}
+
+    exp_sig = {tissue: 1 - st.norm.cdf(exp_z[tissue])
+                for tissue in tissues}
+
+    for tissue in tissues:
+        exp[tissue] = (exp[tissue], exp_z[tissue], exp_sig[tissue])
+
+    return exp
+
+
 def build_expression_tables(
         pathway_db,
         pathway_db_cursor,
@@ -2591,68 +2613,53 @@ def build_expression_tables(
             ON CONFLICT IGNORE)
             """)
 
+    pool = multiprocessing.Pool(processes=3)
     for i, gene in enumerate(gene_exp, 1):
-        for exp in (gene_exp, peptide_exp, protein_exp):
-            mean = sum([exp[gene][tissue] for tissue in tissues])/num_tissues
-            sdv = math.sqrt(sum([(exp[gene][tissue] - mean)**2
-                                for tissue in tissues])/(num_tissues - 1))
-            if sdv == 0.0:
-                exp_z = {tissue: 0.0 for tissue in tissues}
-            else:
-                exp_z = {tissue: (exp[gene][tissue] - mean) / sdv
-                         for tissue in tissues}
-
-            exp_sig = {tissue: 1 - st.norm.cdf(exp_z[tissue])
-                       for tissue in tissues}
-
-            for tissue in tissues:
-                exp[gene][tissue] = (exp[gene][tissue], exp_z[tissue],
-                                     exp_sig[tissue])
-
+        exp = pool.map(standardize,
+                [gene_exp[gene], peptide_exp[gene], protein_exp[gene]])
         for tissue in tissues:
-            entry = (gene,
-                     tissue,
-                     gene_exp[gene][tissue][0],
-                     gene_exp[gene][tissue][1],
-                     gene_exp[gene][tissue][2])
             pathway_db_cursor.execute("""
                 INSERT INTO gene_expression
                 VALUES (?, ?, ?, ?, ?)
-                """, entry)
+                """,
+                (gene,
+                 tissue,
+                 exp[0][tissue][0],
+                 exp[0][tissue][1],
+                 exp[0][tissue][2]))
 
-            entry = (gene,
-                     tissue,
-                     peptide_exp[gene][tissue][0],
-                     peptide_exp[gene][tissue][1],
-                     peptide_exp[gene][tissue][2])
             pathway_db_cursor.execute("""
                 INSERT INTO peptide_expression
                 VALUES (?, ?, ?, ?, ?)
-                """, entry)
+                """,
+                (gene,
+                 tissue,
+                 exp[1][tissue][0],
+                 exp[1][tissue][1],
+                 exp[1][tissue][2]))
 
-            entry = (gene,
-                     tissue,
-                     protein_exp[gene][tissue][0],
-                     protein_exp[gene][tissue][1],
-                     protein_exp[gene][tissue][2])
             pathway_db_cursor.execute("""
                 INSERT INTO protein_expression
                 VALUES (?, ?, ?, ?, ?)
-                """, entry)
+                """,
+                (gene,
+                 tissue,
+                 exp[2][tissue][0],
+                 exp[2][tissue][1],
+                 exp[2][tissue][2]))
 
             tsv_writer.writerow([
                 gene,
                 tissue,
-                gene_exp[gene][tissue][0],
-                gene_exp[gene][tissue][1],
-                gene_exp[gene][tissue][2],
-                peptide_exp[gene][tissue][0],
-                peptide_exp[gene][tissue][1],
-                peptide_exp[gene][tissue][2],
-                protein_exp[gene][tissue][0],
-                protein_exp[gene][tissue][1],
-                protein_exp[gene][tissue][2]])
-
+                exp[0][tissue][0],
+                exp[0][tissue][1],
+                exp[0][tissue][2],
+                exp[1][tissue][0],
+                exp[1][tissue][1],
+                exp[1][tissue][2],
+                exp[2][tissue][0],
+                exp[2][tissue][1],
+                exp[2][tissue][2]])
         gene_num.update(i)
 
     pathway_db.commit()
@@ -2660,6 +2667,10 @@ def build_expression_tables(
 
     return None
 
+def query_database(args):
+    database = args[0]
+    gene = args[1]
+    return database(gene)
 
 def build_pathway_db(
         pathway_db_fp,
@@ -2779,9 +2790,14 @@ def build_pathway_db(
 
     logging.info("Number of input genes: %s", num_input_genes)
     context_genes = set()
+
+    pool = multiprocessing.Pool(processes = 3)
     for i, gene in enumerate(input_genes, 1):
-        for database in (kegg, reactome, wikipathways):
-            for pathway in database(gene):
+        args = [(database, gene)
+                for database in (kegg, reactome, wikipathways)]
+        results = pool.map(query_database, args)
+        for result in results:
+            for pathway in result:
                 pathway_db_cursor.execute("""
                     INSERT INTO genes
                     VALUES (?, ?, ?)
@@ -2799,7 +2815,7 @@ def build_pathway_db(
                             INSERT INTO upstream
                             VALUES (?, ?, ?, ?)
                             """, (pathway[1], pathway[2], pathway[0],
-                                  upstream_gene))
+                                upstream_gene))
 
                 else:
                     pathway_db_cursor.execute("""
@@ -2814,7 +2830,7 @@ def build_pathway_db(
                             INSERT INTO downstream
                             VALUES (?, ?, ?, ?)
                             """, (pathway[1], pathway[2], pathway[0],
-                                  downstream_gene))
+                                downstream_gene))
 
                 else:
                     pathway_db_cursor.execute("""
@@ -2866,29 +2882,48 @@ def parse_summary_file(
         summary_file_fp,
         buffer_size):
 
-    genes = set()
-    snps = {}
+    genes = {}
     with open(summary_file_fp, "r", buffering=buffer_size) as summary_file:
         summary_reader = csv.reader(summary_file, delimiter="\t")
         next(summary_reader)
         for line in summary_reader:
             snp = line[0]
             gene = line[3]
-            if snp not in snps:
-                snps[snp] = set()
-            snps[snp].add(gene)
-            genes.add(gene)
+            if snp not in genes:
+                genes[snp] = set()
+            genes[snp].add(gene)
 
-    return list(genes), {snp: list(snps[snp]) for snp in snps}
+    return {snp: list(snps[snp]) for snp in genes}
 
 def produce_pathway_summary(
-        genes,
         snps,
         pathway_db_fp,
         output_dir,
         buffer_size,
         num_processes,
         p_value):
+
+    pathway_db = sqlite3.connect(pathway_db_tmp_fp)
+    pathway_db_cursor = pathway_db.cursor()
+
+    genes = set([gene for gene in genes
+                 for genes in snps.values()])
+
+    pathways_per_gene = {}
+    for gene in genes:
+        pathways_per_gene[gene] = set(pathway_db_cursor.execute("""
+            SELECT database, pathway
+            FROM genes
+            WHERE gene = ?
+            """, gene))
+
+    pathways = {}
+    for gene in pathways_per_gene:
+        for pathway in pathways_per_gene[gene]:
+            if pathway not in pathways:
+                pathways[pathway] = set()
+            pathways[pathway].add(gene)
+
 
     return None
 
@@ -2997,11 +3032,11 @@ if __name__ == "__main__":
         args.fdr_threshold, args.local_databases_only,
         args.num_processes, args.output_dir, gene_dict_fp, snp_dict_fp,
         suppress_intermediate_files=args.suppress_intermediate_files)
-    genes, snps = produce_summary(
+    snps = produce_summary(
         p_values, snps, genes, gene_database_fp, expression_table_fp,
         args.fdr_threshold, args.output_dir, args.buffer_size_in,
         args.buffer_size_out, args.num_processes_summary)
-    produce_pathway_summary(genes, snps, pathway_db_fp, args.output_dir,
+    produce_pathway_summary(snps, pathway_db_fp, args.output_dir,
         args.buffer_size_out, args.num_processes_summary,
         args.significant_expression)
 
