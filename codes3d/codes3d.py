@@ -1049,6 +1049,7 @@ def produce_summary(
     gene_ids = gene_exp.keys()
     tissues = list(GENE_DF)
 
+
     genes_tissues = [(gene, tissue)
                      for gene in gene_ids
                      for tissue in tissues]
@@ -1060,7 +1061,7 @@ def produce_summary(
 
     print("\n\tMultiprocessing utilizing {} processes:".format(num_processes))
 
-    print("\tCollecting gene expression rates [|{}|]...".format(
+    print("\tCollecting gene expression rates (|{}|)...".format(
           len(genes_tissues)))
     expression = pool.map(get_expression, genes_tissues)
     del GENE_DF
@@ -1068,7 +1069,7 @@ def produce_summary(
     for i in range(len(genes_tissues)):
         gene_exp[genes_tissues[i][0]][genes_tissues[i][1]] = expression[i][0]
 
-    print("\tDetermining gene expression extremes [|{}|]...".format(
+    print("\tDetermining gene expression extremes (|{}|)...".format(
           len(gene_ids)))
     extremes = pool.map(get_expression_extremes, [gene_exp[gene]
                                                   for gene in gene_ids])
@@ -1082,7 +1083,7 @@ def produce_summary(
     for i in range(len(genes_tissues)):
         gene_exp[genes_tissues[i][0]][genes_tissues[i][1]] = expression[i][1]
 
-    print("\tComputing HiC data [|{}|]...".format(len(snps_genes)))
+    print("\tComputing HiC data (|{}|)...".format(len(snps_genes)))
     hic_data = pool.map(calc_hic_contacts, [genes[snp][gene]
                                             for snp, gene in snps_genes])
 
@@ -1126,7 +1127,8 @@ def produce_summary(
     summary.close()
     sig_file.close()
 
-    return gene_ids
+    return gene_ids, {snp: genes[snp].keys() for snp in genes}
+
 
 def compute_adj_pvalues(p_values):
     """ A Benjamini-Hochberg adjustment of p values of SNP-gene eQTL
@@ -2864,25 +2866,31 @@ def parse_summary_file(
         summary_file_fp,
         buffer_size):
 
-    gene_ids = set()
+    genes = set()
+    snps = {}
     with open(summary_file_fp, "r", buffering=buffer_size) as summary_file:
         summary_reader = csv.reader(summary_file, delimiter="\t")
         next(summary_reader)
         for line in summary_reader:
-            gene_ids.add(line[3])
+            snp = line[0]
+            gene = line[3]
+            if snp not in snps:
+                snps[snp] = set()
+            snps[snp].add(gene)
+            genes.add(gene)
 
-    return list(gene_ids)
+    return list(genes), {snp: list(snps[snp]) for snp in snps}
 
 def produce_pathway_summary(
         genes,
+        snps,
         pathway_db_fp,
         output_dir,
         buffer_size,
         num_processes,
         p_value):
 
-    for gene in genes:
-        print(gene)
+    pass
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="")
@@ -2989,11 +2997,11 @@ if __name__ == "__main__":
         args.fdr_threshold, args.local_databases_only,
         args.num_processes, args.output_dir, gene_dict_fp, snp_dict_fp,
         suppress_intermediate_files=args.suppress_intermediate_files)
-    gene_ids = produce_summary(
+    genes, snps = produce_summary(
         p_values, snps, genes, gene_database_fp, expression_table_fp,
         args.fdr_threshold, args.output_dir, args.buffer_size_in,
         args.buffer_size_out, args.num_processes_summary)
-    produce_pathway_summary(gene_ids, pathway_db_fp, args.output_dir,
+    produce_pathway_summary(genes, snps, pathway_db_fp, args.output_dir,
         args.buffer_size_out, args.num_processes_summary,
         args.significant_expression)
 
