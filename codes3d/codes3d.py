@@ -814,36 +814,52 @@ def get_gene_expression_information(eqtls, expression_table_fp, output_dir):
         "/gene_expression_table.txt",
         sep='\t')
 
-def get_expression(gene_tissue_tuple):
+def get_expression(args):
+    global gene_exp
+    gene, tissue = args
+
     try:
-        expression = list(GENE_DF.at[gene_tissue_tuple[0],
-                                     gene_tissue_tuple[1]])
-        return (expression, max(expression))
+        return list(GENE_DF.at[gene, tissue])
     except TypeError:
-        expression = list([GENE_DF.at[gene_tissue_tuple[0],
-                                      gene_tissue_tuple[1]]])
-        return (expression, expression[0])
+        return list([GENE_DF.at[gene, tissue]])
     except KeyError:
         print("\t\tWarning: No expression information for %s in %s."
               % (gene, tissue))
-        return ([], 'NA')
+        return "NA"
 
 def get_expression_extremes(gene_exp):
-    for tissue in gene_exp.keys():
-        gene_exp[tissue] = [x for x in gene_exp[tissue] if x > 0.0]
-        if not gene_exp[tissue]:
-            del gene_exp[tissue]
+    dict_copy = gene_exp.copy()
+    for tissue in dict_copy.keys():
+        dict_copy[tissue] = [x for x in gene_exp[tissue] if x > 0.0]
+        if not dict_copy[tissue]:
+            del dict_copy[tissue]
 
-    if not gene_exp:
-        return ('NA', 'NA', 'NA', 'NA')
 
-    max_expression = max(gene_exp.iteritems(), key=lambda exp: max(exp[1]))
-    min_expression = min(gene_exp.iteritems(), key=lambda exp: min(exp[1]))
+    if dict_copy:
+        max_expression = max(dict_copy.iteritems(),
+                                key=lambda exp: max(exp[1]))
+        min_expression = min(dict_copy.iteritems(),
+                                key=lambda exp: min(exp[1]))
 
-    return (max_expression[0], max(max_expression[1]), min_expression[0],
-            min(min_expression[1]))
+        gene_exp['max_tissue'] = max_expression[0]
+        gene_exp['max_rate'] = max(max_expression[1])
+        gene_exp['min_tissue'] = min_expression[0]
+        gene_exp['min_rate'] = min(min_expression[1])
 
-def calc_hic_contacts(snp_gene_dict):
+    else:
+        gene_exp['max_tissue'] = "NA"
+        gene_exp['max_rate'] = "NA"
+        gene_exp['min_tissue'] = "NA"
+        gene_exp['min_rate'] = "NA"
+
+    for tissue in gene_exp:
+        if (tissue not in ("max_tissue", "max_rate", "min_tissue", "min_rate")
+                and gene_exp[tissue] != "NA"):
+            gene_exp[tissue] = max(gene_exp[tissue])
+
+    return gene_exp
+
+def calc_hic_contacts(args):
     """Calculates score of HiC contacts between SNP and gene.
 
     Args:
@@ -856,9 +872,13 @@ def calc_hic_contacts(snp_gene_dict):
         cell line
         hic_score: sum of the averages of contacts per cell line.
     """
+
+    gene, snp, snp_gene_dict = args
+
     hic_score = 0
     cell_lines = sorted(snp_gene_dict.keys())
     scores = []
+
     for cell_line in cell_lines:
         score = snp_gene_dict[cell_line]['interactions'] / float(
                         snp_gene_dict[cell_line]['replicates'])
@@ -867,6 +887,7 @@ def calc_hic_contacts(snp_gene_dict):
 
     return (', '.join(cell_lines), ', '.join(scores),
             "{:.4f}".format(hic_score))
+
 
 def produce_summary(
         p_values, snps, genes, gene_database_fp,
@@ -961,10 +982,16 @@ def produce_summary(
         p_values_map[p_values[i]] = adjusted_p_values[i]
 
     to_file = []
-    gene_exp = {}
+    gene_set = set()
 
     print("Compiling summary...")
-    bar = progressbar.ProgressBar(max_value=progressbar.UnknownLength)
+
+    row_count = 0
+    for row in ereader:
+        row_count += 1
+    eqtlfile.seek(0)
+
+    bar = progressbar.ProgressBar(max_value=row_count)
     bar.update(0)
 
     for i, row in enumerate(ereader, 1):
@@ -1036,60 +1063,43 @@ def produce_summary(
                    p_thresh,
                    interaction,
                    distance_from_snp])
-        if gene not in gene_exp:
-            gene_exp[gene] = {}
 
+        gene_set.add(gene)
         bar.update(i)
 
     global GENE_DF
     GENE_DF = pandas.read_table(expression_table_fp, index_col="Description",
                                 engine='c', compression=None, memory_map=True)
 
-    snps = genes.keys()
-    gene_ids = gene_exp.keys()
-    tissues = list(GENE_DF)
-
-
-    genes_tissues = [(gene, tissue)
-                     for gene in gene_ids
-                     for tissue in tissues]
-    snps_genes = [(snp, gene) for snp in snps for gene in gene_ids]
-
     current_process = psutil.Process()
     num_processes = min(num_processes, len(current_process.cpu_affinity()))
     pool = multiprocessing.Pool(processes=num_processes)
 
-    print("\n\tMultiprocessing utilizing {} processes:".format(num_processes))
+    snps = genes.keys()
+    gene_list = list(gene_set)
+    tissues = list(GENE_DF)
 
-    print("\tCollecting gene expression rates (|{}|)...".format(
-          len(genes_tissues)))
-    expression = pool.map(get_expression, genes_tissues)
+    print("\n\tMultiprocessing with {} processes:".format(num_processes))
+    print("\tCollecting {} tissue-specific gene expression rates...".format(
+          len(gene_list) * len(tissues)))
+    exp = pool.map(get_expression, ((gene, tissue)
+            for tissue in tissues for gene in gene_list))
+    gene_exp = {gene: {tissue: exp.pop(0)
+                for tissue in tissues} for gene in gene_list}
     del GENE_DF
 
-    for i in range(len(genes_tissues)):
-        gene_exp[genes_tissues[i][0]][genes_tissues[i][1]] = expression[i][0]
+    print("\tDetermining {} gene expression extremes...".format(
+          len(gene_list)))
+    exp_max = pool.map(get_expression_extremes,
+                 (gene_exp[gene] for gene in gene_list))
+    gene_exp = {gene: exp_max.pop(0) for gene in gene_list}
 
-    print("\tDetermining gene expression extremes (|{}|)...".format(
-          len(gene_ids)))
-    extremes = pool.map(get_expression_extremes, [gene_exp[gene]
-                                                  for gene in gene_ids])
-
-    for i in range(len(gene_ids)):
-        gene_exp[gene_ids[i]]['max_tissue'] = extremes[i][0]
-        gene_exp[gene_ids[i]]['max_rate'] = extremes[i][1]
-        gene_exp[gene_ids[i]]['min_tissue'] = extremes[i][2]
-        gene_exp[gene_ids[i]]['min_rate'] = extremes[i][3]
-
-    for i in range(len(genes_tissues)):
-        gene_exp[genes_tissues[i][0]][genes_tissues[i][1]] = expression[i][1]
-
-    print("\tComputing HiC data (|{}|)...".format(len(snps_genes)))
-    hic_data = pool.map(calc_hic_contacts, [genes[snp][gene]
-                                            for snp, gene in snps_genes])
-
-    hic_dict = {}
-    for i in range(len(snps_genes)):
-        hic_dict[snps_genes[i]] = hic_data[i]
+    print("\tComputing HiC information for {} snp-gene combinations...".format(
+          len(snps) * len(gene_list)))
+    hic_data = pool.map(calc_hic_contacts, ((snp, gene, genes[snp][gene])
+                    for gene in gene_list for snp in snps))
+    hic_dict = {snp: {gene: hic_data.pop(0)
+                for gene in gene_list} for snp in snps}
 
     pool.close()
 
@@ -1101,11 +1111,11 @@ def produce_summary(
         snp = line[0]
         gene = line[3]
         tissue = line[7]
-        try:
-            line.insert(11, hic_dict[(snp, gene)][2])
-            line.insert(11, hic_dict[(snp, gene)][1])
-            line.insert(11, hic_dict[(snp, gene)][0])
-        except KeyError:
+        if snp in hic_dict and gene in hic_dict[snp]:
+            line.insert(11, hic_dict[snp][gene][2])
+            line.insert(11, hic_dict[snp][gene][1])
+            line.insert(11, hic_dict[snp][gene][0])
+        else:
             line.insert(11, 'NA')
             line.insert(11, 'NA')
             line.insert(11, 'NA')
@@ -2445,7 +2455,7 @@ def standardize(exp):
     return exp
 
 
-def build_expression_tables(
+def build_expression_table(
         pathway_db,
         pathway_db_cursor,
         pathway_db_tsv_exp_fp,
@@ -2456,7 +2466,7 @@ def build_expression_tables(
         genes,
         num_genes):
 
-    """Build protein expression tables for pathway.db"""
+    """Build protein expression table for pathway.db"""
 
     gene_exp = {}
     with open(pathway_db_exp_gene_fp, "r") as gene_exp_file:
@@ -2555,95 +2565,61 @@ def build_expression_tables(
     tsv_writer = csv.writer(tsv_file, delimiter="\t", lineterminator="\n")
     tsv_header = ["Gene",
                   "Tissue",
-                  "Expression_Gene_Level",
-                  "Standardized_Expression_Gene_Level",
-                  "p-Value_Gene_Level",
-                  "Expression_Peptide_Level",
-                  "Standardized_Expression_Peptide_Level",
-                  "p-Value_Peptide_Level",
-                  "Expression_Protein_Level",
-                  "Standardized_Expression_Protein_Level",
-                  "p-Value_Protein_Level"]
+                  "Gene_Expression",
+                  "Z-Score_Gene_Expression",
+                  "p-Value_Gene_Expression",
+                  "Peptide_Expression",
+                  "Z-Score_Peptide_Expression",
+                  "p-Value_Peptide_Expression",
+                  "Protein_Expression",
+                  "Z-Score_Protein_Expression",
+                  "p-Value_Protein_Expression"]
     tsv_writer.writerow(tsv_header)
 
     pathway_db_cursor.execute("""
-        DROP TABLE IF EXISTS gene_expression
-        """)
-    pathway_db_cursor.execute("""
-        DROP TABLE IF EXISTS peptide_expression
-        """)
-    pathway_db_cursor.execute("""
-        DROP TABLE IF EXISTS protein_expression
+        DROP TABLE IF EXISTS
+            Expression
         """)
 
     pathway_db_cursor.execute("""
-        CREATE TABLE gene_expression (
-            gene TEXT,
-            tissue TEXT,
-            expression REAL,
-            z_score REAL,
-            significance REAL,
-            PRIMARY KEY (
-                gene,
-                tissue)
-            ON CONFLICT IGNORE)
-            """)
-    pathway_db_cursor.execute("""
-        CREATE TABLE peptide_expression (
-            gene TEXT,
-            tissue TEXT,
-            expression REAL,
-            z_score REAL,
-            significance REAL,
-            PRIMARY KEY (
-                gene,
-                tissue)
-            ON CONFLICT IGNORE)
-            """)
-    pathway_db_cursor.execute("""
-        CREATE TABLE protein_expression (
-            gene TEXT,
-            tissue TEXT,
-            expression REAL,
-            z_score REAL,
-            significance REAL,
-            PRIMARY KEY (
-                gene,
-                tissue)
-            ON CONFLICT IGNORE)
+        CREATE TABLE
+            Expression (
+                gene TEXT,
+                tissue TEXT,
+                gene_exp REAL,
+                gene_exp_z REAL,
+                gene_exp_p REAL,
+                peptide_exp REAL,
+                peptide_exp_z REAL,
+                peptide_exp_p REAL,
+                protein_exp REAL,
+                protein_exp_z REAL,
+                protein_exp_p REAL,
+                PRIMARY KEY (
+                    gene,
+                    tissue)
+                ON CONFLICT IGNORE)
             """)
 
     pool = multiprocessing.Pool(processes=3)
-    for i, gene in enumerate(gene_exp, 1):
+    for i, gene in enumerate([gene for gene in genes if gene in gene_exp], 1):
         exp = pool.map(standardize,
                 [gene_exp[gene], peptide_exp[gene], protein_exp[gene]])
-        for tissue in tissues:
+        for tissue in sorted(tissues):
             pathway_db_cursor.execute("""
-                INSERT INTO gene_expression
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO
+                    Expression
+                VALUES
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (gene,
                  tissue,
                  exp[0][tissue][0],
                  exp[0][tissue][1],
-                 exp[0][tissue][2]))
-
-            pathway_db_cursor.execute("""
-                INSERT INTO peptide_expression
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (gene,
-                 tissue,
+                 exp[0][tissue][2],
                  exp[1][tissue][0],
                  exp[1][tissue][1],
-                 exp[1][tissue][2]))
-
-            pathway_db_cursor.execute("""
-                INSERT INTO protein_expression
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (gene,
-                 tissue,
+                 exp[1][tissue][2],
                  exp[2][tissue][0],
                  exp[2][tissue][1],
                  exp[2][tissue][2]))
@@ -2660,16 +2636,17 @@ def build_expression_tables(
                 exp[2][tissue][0],
                 exp[2][tissue][1],
                 exp[2][tissue][2]])
+
         gene_num.update(i)
 
+    pool.close()
     pathway_db.commit()
     tsv_file.close()
 
     return None
 
 def query_database(args):
-    database = args[0]
-    gene = args[1]
+    database, gene = args
     return database(gene)
 
 def build_pathway_db(
@@ -2724,64 +2701,72 @@ def build_pathway_db(
     tsv_writer.writerow(tsv_header)
 
     pathway_db_cursor.execute("""
-        DROP TABLE IF EXISTS genes
+        DROP TABLE IF EXISTS
+            Pathways
         """)
     pathway_db_cursor.execute("""
-        DROP TABLE IF EXISTS names
+        DROP TABLE IF EXISTS
+            PathwayNames
         """)
     pathway_db_cursor.execute("""
-        DROP TABLE IF EXISTS upstream
+        DROP TABLE IF EXISTS
+            UpstreamGenes
         """)
     pathway_db_cursor.execute("""
-        DROP TABLE IF EXISTS downstream
+        DROP TABLE IF EXISTS
+            DownstreamGenes
         """)
 
     pathway_db_cursor.execute("""
-        CREATE TABLE genes (
-            database TEXT,
-            pathway TEXT,
-            gene TEXT,
-            PRIMARY KEY (
-                database,
-                pathway,
-                gene)
-            ON CONFLICT IGNORE)
+        CREATE TABLE
+            Pathways (
+                database TEXT,
+                pathway TEXT,
+                gene TEXT,
+                PRIMARY KEY (
+                    database,
+                    pathway,
+                    gene)
+                ON CONFLICT IGNORE)
         """)
     pathway_db_cursor.execute("""
-        CREATE TABLE names (
-            database TEXT,
-            pathway TEXT,
-            pathway_name TEXT,
-            PRIMARY KEY (
-                database,
-                pathway)
-            ON CONFLICT IGNORE)
+        CREATE TABLE
+            PathwayNames (
+                database TEXT,
+                pathway TEXT,
+                name TEXT,
+                PRIMARY KEY (
+                    database,
+                    pathway)
+                ON CONFLICT IGNORE)
         """)
     pathway_db_cursor.execute("""
-        CREATE TABLE upstream (
-            database TEXT,
-            pathway TEXT,
-            gene TEXT,
-            upstream TEXT,
-            PRIMARY KEY (
-                database,
-                pathway,
-                gene,
-                upstream)
-            ON CONFLICT IGNORE)
+        CREATE TABLE
+            UpstreamGenes (
+                database TEXT,
+                pathway TEXT,
+                gene TEXT,
+                upstream_gene TEXT,
+                PRIMARY KEY (
+                    database,
+                    pathway,
+                    gene,
+                    upstream_gene)
+                ON CONFLICT IGNORE)
         """)
     pathway_db_cursor.execute("""
-        CREATE TABLE downstream (
-            database TEXT,
-            pathway TEXT,
-            gene TEXT,
-            downstream TEXT,
-            PRIMARY KEY (
-                database,
-                pathway,
-                gene,
-                downstream)
-            ON CONFLICT IGNORE)
+        CREATE TABLE
+            DownstreamGenes (
+                database TEXT,
+                pathway TEXT,
+                gene TEXT,
+                downstream_gene TEXT,
+                PRIMARY KEY (
+                    database,
+                    pathway,
+                    gene,
+                    downstream_gene)
+                ON CONFLICT IGNORE)
         """)
 
     log_kegg_release()
@@ -2789,9 +2774,9 @@ def build_pathway_db(
     log_wikipathways_release()
 
     logging.info("Number of input genes: %s", num_input_genes)
-    context_genes = set()
+    trans_stream_genes = set()
 
-    pool = multiprocessing.Pool(processes = 3)
+    pool = multiprocessing.Pool(processes=3)
     for i, gene in enumerate(input_genes, 1):
         args = [(database, gene)
                 for database in (kegg, reactome, wikipathways)]
@@ -2799,44 +2784,39 @@ def build_pathway_db(
         for result in results:
             for pathway in result:
                 pathway_db_cursor.execute("""
-                    INSERT INTO genes
-                    VALUES (?, ?, ?)
+                    INSERT INTO
+                        Pathways
+                    VALUES
+                        (?, ?, ?)
                     """, (pathway[1], pathway[2], pathway[0]))
 
                 pathway_db_cursor.execute("""
-                    INSERT INTO names
-                    VALUES (?, ?, ?)
+                    INSERT INTO
+                        PathwayNames
+                    VALUES
+                        (?, ?, ?)
                     """, (pathway[1], pathway[2], pathway[4]))
 
-                if pathway[5]:
-                    for upstream_gene in pathway[5]:
-                        context_genes.add(upstream_gene)
-                        pathway_db_cursor.execute("""
-                            INSERT INTO upstream
-                            VALUES (?, ?, ?, ?)
-                            """, (pathway[1], pathway[2], pathway[0],
-                                upstream_gene))
-
-                else:
+                for upstream_gene in pathway[5]:
+                    trans_stream_genes.add(upstream_gene)
                     pathway_db_cursor.execute("""
-                        INSERT INTO upstream
-                        VALUES (?, ?, ?, ?)
-                        """, (pathway[1], pathway[2], pathway[0], None))
+                        INSERT INTO
+                            UpstreamGenes
+                        VALUES
+                            (?, ?, ?, ?)
+                        """, (pathway[1], pathway[2], pathway[0],
+                            upstream_gene))
 
-                if pathway[6]:
-                    for downstream_gene in pathway[6]:
-                        context_genes.add(downstream_gene)
-                        pathway_db_cursor.execute("""
-                            INSERT INTO downstream
-                            VALUES (?, ?, ?, ?)
-                            """, (pathway[1], pathway[2], pathway[0],
-                                downstream_gene))
-
-                else:
+                for downstream_gene in pathway[6]:
+                    trans_stream_genes.add(downstream_gene)
                     pathway_db_cursor.execute("""
-                        INSERT INTO downstream
-                        VALUES (?, ?, ?, ?)
-                        """, (pathway[1], pathway[2], pathway[0], None))
+                        INSERT INTO
+                            DownstreamGenes
+                        VALUES
+                            (?, ?, ?, ?)
+                        """, (pathway[1], pathway[2], pathway[0],
+                            downstream_gene))
+
 
                 tsv_line = [entry.encode("utf-8") for entry in pathway[:5]]
 
@@ -2849,29 +2829,26 @@ def build_pathway_db(
                 if pathway[6]:
                     downstream = ", ".join(
                         [entry.encode("utf-8") for entry in pathway[6]])
-                else:
-                    downstream = "NA"
-
                 tsv_line.extend([upstream, downstream])
                 tsv_writer.writerow(tsv_line)
 
         input_gene_num.update(i)
 
+    pool.close()
     pathway_db.commit()
     tsv_file.close()
 
-    genes = context_genes | set(input_genes)
-    num_genes = len(genes)
+    input_genes.extend(sorted(list(trans_stream_genes)))
+    num_genes = len(input_genes)
     logging.info("Number of genes including up- and downstream genes: %s",
                  num_genes)
 
-    build_expression_tables(pathway_db, pathway_db_cursor,
+    build_expression_table(pathway_db, pathway_db_cursor,
                             pathway_db_tsv_exp_fp, pathway_db_gene_map_fp,
                             pathway_db_exp_gene_fp, pathway_db_exp_pept_fp,
-                            pathway_db_exp_prot_fp, genes, num_genes)
+                            pathway_db_exp_prot_fp, input_genes, num_genes)
 
     pathway_db.close()
-
     os.rename(pathway_db_tmp_fp, pathway_db_fp)
     logging.info("Build completed.")
     logging.shutdown()
@@ -2893,37 +2870,230 @@ def parse_summary_file(
                 genes[snp] = set()
             genes[snp].add(gene)
 
-    return {snp: list(snps[snp]) for snp in genes}
+    return {snp: list(genes[snp]) for snp in genes}
+
+def query_pathway_db_gene_pathway(gene):
+        return pathways
+
+def query_pathway_db_gene_exp(gene):
+    exp = {}
+
+    return exp
+
+def query_pathway_db_pathway_name(args):
+    return pathway_db_cursor.execute("""
+            SELECT
+                pathway_name
+            FROM
+                PathwayNames
+            WHERE
+                database = ? AND
+                pathway = ?
+            """, args).fetchone()
 
 def produce_pathway_summary(
-        snps,
+        genes,
         pathway_db_fp,
         output_dir,
         buffer_size,
-        num_processes,
         p_value):
 
-    pathway_db = sqlite3.connect(pathway_db_tmp_fp)
+    pathway_db = sqlite3.connect(pathway_db_fp)
     pathway_db_cursor = pathway_db.cursor()
 
-    genes = set([gene for gene in genes
-                 for genes in snps.values()])
+    gene_list = [gene for gene_group in genes.values() for gene in gene_group]
+    pathways = dict.fromkeys(gene_list, {})
+    exp = dict.fromkeys(gene_list, {})
 
-    pathways_per_gene = {}
-    for gene in genes:
-        pathways_per_gene[gene] = set(pathway_db_cursor.execute("""
-            SELECT database, pathway
-            FROM genes
-            WHERE gene = ?
-            """, gene))
+    print("Querying local database for gene-pathway associations and " +\
+          "expression data...")
+    gene_num = progressbar.ProgressBar(max_value=len(pathways))
+    gene_num.update(0)
 
-    pathways = {}
-    for gene in pathways_per_gene:
-        for pathway in pathways_per_gene[gene]:
-            if pathway not in pathways:
-                pathways[pathway] = set()
-            pathways[pathway].add(gene)
+    for i, gene in enumerate(pathways, 1):
+        for (database, pathway, upstream_gene,
+             downstream_gene) in pathway_db_cursor.execute("""
+                SELECT
+                    Pathways.database AS database,
+                    Pathways.pathway AS pathway,
+                    UpstreamGenes.upstream_gene AS upstream_gene,
+                    DownstreamGenes.downstream_gene AS downstream_gene
+                FROM
+                    Pathways
+                    NATURAL JOIN UpstreamGenes
+                    NATURAL JOIN DownstreamGenes
+                WHERE
+                    gene = ?
+                """, (gene,)):
+            if (database, pathway) not in pathways:
+                pathways[gene][(database, pathway)] = {
+                    "upstream": set(),
+                    "downstream": set()}
+            pathways[gene][(database, pathway)]["upstream"].add(upstream_gene)
+            pathways[gene][(database, pathway)]["downstream"].add(
+                downstream_gene)
 
+        for (tissue, gene_exp, gene_exp_z, gene_exp_p, peptide_exp,
+             peptide_exp_z, peptide_exp_p, protein_exp, protein_exp_z,
+             protein_exp_p) in pathway_db_cursor.execute("""
+                SELECT
+                    tissue,
+                    gene_exp,
+                    gene_exp_z,
+                    gene_exp_p,
+                    peptide_exp,
+                    peptide_exp_z,
+                    peptide_exp_p,
+                    protein_exp,
+                    protein_exp_z,
+                    protein_exp_p
+                FROM
+                    Expression
+                WHERE
+                    gene = ?
+                """, (gene,)):
+            exp[gene][tissue] = {
+                "gene": {
+                    "exp": gene_exp,
+                    "z-score": gene_exp_z,
+                    "p-value": gene_exp_p
+                },
+                "peptide": {
+                    "exp": peptide_exp,
+                    "z-score": peptide_exp_z,
+                    "p-value": peptide_exp_p
+                },
+                "protein": {
+                    "exp": protein_exp,
+                    "z-score": protein_exp_z,
+                    "p-value": protein_exp_p
+                }
+            }
+
+        gene_num.update(i)
+
+    pathway_name  = dict.fromkeys([pathway
+                                   for pathway_group in pathways.values()
+                                   for pathway in pathway_group])
+
+    print("Querying local database for pathway names...")
+    pathway_num = progressbar.ProgressBar(max_value=len(pathway_name))
+    pathway_num.update(0)
+    for i, pathway in enumerate(pathway_name, 1):
+        pathway_name = pathway_db_cursor.execute("""
+            SELECT
+                name
+            FROM
+                PathwayNames
+            WHERE
+                database = ? AND
+                pathway = ?
+            """, pathway).fetchone()
+
+        pathway_num.update(i)
+
+    pathway_db.close()
+
+    summary_file = open(os.path.join(output_dir, "pathway_summary.txt"), "w",
+                        buffering=buffer_size)
+    summary_file_sig = open(
+            os.path.join(output_dir, "pathway_summary_sig.txt"), "w",
+            buffering=buffer_size)
+
+    summary_writer = csv.writer(summary_file, delimiter="\t")
+    summary_writer_sig = csv.writer(summary_file_sig, delimiter="\t")
+
+    summary_header = [
+        "SNP",
+        "Gene",
+        "Database",
+        "Pathway",
+        "Pathway_Name",
+        "Up-/Downstream_Gene",
+        "Upstream",
+        "Downstream",
+        "Tissue",
+        "Gene_Level_Expression",
+        "Gene_Level_Expression_z-Score",
+        "Gene_Level_Expression_p-Value",
+        "Gene_Level_Expression",
+        "Peptide_Level_Expression_z-Score",
+        "Peptide_Level_Expression_p-Value",
+        "Protein_Level_Expression",
+        "Protein_Level_Expression_z-Score",
+        "Protein_Level_Expression_p-Value",
+        "Up-/Downstream_Gene_Gene_Level_Expression",
+        "Up-/Downstream_Gene_Gene_Level_Expression_z-Score",
+        "Up-/Downstream_Gene_Gene_Level_Expression_p-Value"
+        "Up-/Downstream_Gene_Peptide_Level_Expression",
+        "Up-/Downstream_Gene_Peptide_Level_Expression_z-Score",
+        "Up-/Downstream_Gene_Peptide_Level_Expression_p-Value"
+        "Up-/Downstream_Gene_Protein_Level_Expression",
+        "Up-/Downstream_Gene_Protein_Level_Expression_z-Score",
+        "Up-/Downstream_Gene_Protein_Level_Expression_p-Value"]
+
+    summary_writer.writerow(summary_header)
+    summary_writer_sig.writerow(summary_header)
+
+    for snp in genes:
+        for gene in genes[snp]:
+            for database, pathway in pathways[gene]:
+                for trans_stream in pathways[gene][
+                        (database, pathway)].values():
+                    for tissue in exp_gene:
+                        to_file = [
+                            snp,
+                            gene,
+                            database,
+                            pathway,
+                            pathway_name[(database, pathway)],
+                            trans_stream,
+                            str(up_down_stream_gene in pathways[gene][
+                                (database, pathway)]["upstream"]),
+                            str(up_down_stream_gene in pathways[gene][
+                                (database, pathway)]["downstream"]),
+                            tissue]
+
+                        if exp[gene]:
+                            to_file.extend([
+                                exp[gene][tissue]["gene"]["exp"],
+                                exp[gene][tissue]["gene"]["z-score"],
+                                exp[gene][tissue]["gene"]["p-value"],
+                                exp[gene][tissue]["peptide"]["exp"],
+                                exp[gene][tissue]["peptide"]["z-score"],
+                                exp[gene][tissue]["peptide"]["p-value"],
+                                exp[gene][tissue]["protein"]["exp"],
+                                exp[gene][tissue]["protein"]["z-score"],
+                                exp[gene][tissue]["protein"]["p-value"]])
+                        else:
+                            to_file.extend(["NA", "NA", "NA", "NA", "NA", "NA",
+                                            "NA", "NA", "NA"])
+                        if exp[trans_stream]:
+                            to_file.extend([
+                                exp[trans_stream][tissue]["gene"]["exp"],
+                                exp[trans_stream][tissue]["gene"]["z-score"],
+                                exp[trans_stream][tissue]["gene"]["p-value"],
+                                exp[trans_stream][tissue]["peptide"]["exp"],
+                                exp[trans_stream][tissue]["peptide"][
+                                    "z-score"],
+                                exp[trans_stream][tissue]["peptide"][
+                                    "p-value"],
+                                exp[trans_stream][tissue]["protein"]["exp"],
+                                exp[trans_stream][tissue]["protein"][
+                                    "z-score"],
+                                exp[trans_stream][tissue]["protein"][
+                                    "p-value"]])
+                        else:
+                            to_file.extend(["NA", "NA", "NA", "NA", "NA", "NA",
+                                            "NA", "NA", "NA"])
+
+                        summary_writer.writerow(to_file)
+                        if (exp[gene] and
+                            exp[gene][tissue]["protein"] <= p_value):
+                            summary_writer_sig.writerow(to_file)
+
+    summary_file.close()
+    summary_file_sig.close()
 
     return None
 
@@ -2939,7 +3109,7 @@ if __name__ == "__main__":
                         "hiCquery run (default: conf.py)")
     parser.add_argument("-n", "--include_cell_lines", nargs='+',
                         help="Space-separated list of cell lines to include " +\
-                    "(others will be ignored). NOTE: Mutually exclusive " +\
+                        "(others will be ignored). NOTE: Mutually exclusive " +\
                         "with EXCLUDE_CELL_LINES.")
     parser.add_argument("-x", "--exclude_cell_lines", nargs='+',
                         help="Space-separated list of cell lines to exclude " +\
@@ -2947,7 +3117,7 @@ if __name__ == "__main__":
                         "with INCLUDE_CELL_LINES.")
     parser.add_argument("-o", "--output_dir", default="codes3d_output",
                         help="The directory in which to output results " +\
-                        "(\"codes3d_output\" by default).")
+                        "(\"hiCquery_output\" by default).")
     parser.add_argument("-l", "--local_databases_only", action="store_true",
                         default=False, help="Consider only local databases. " +\
                         "Will only include cis-eQTLs if using downloadable " +\
@@ -2971,16 +3141,11 @@ if __name__ == "__main__":
     parser.add_argument("-d","--buffer_size_out",type=int,default=1048576,
                         help="Buffer size applied to file output during " +\
                         "compilation (default: 1048576).")
-    parser.add_argument("-r", "--num_processes_summary", type=int,
+    parser.add_argument("-k", "--num_processes_summary", type=int,
                         default=min(psutil.cpu_count(), 32),
                         help="The number of processes for compilation of " +\
-                        "results (default: %s)." %
+                        "the results (default: %s)." %
                         str(min(psutil.cpu_count(), 32)))
-    parser.add_argument("-e", "--significant-expression", type=float,
-                        default=0.05,
-                        help="p-value of significant expression variation " +\
-                        "(default: 0.05).")
-
     args = parser.parse_args()
     config = configparser.ConfigParser()
     config.read(args.config)
@@ -3005,8 +3170,8 @@ if __name__ == "__main__":
                                        config.get("Defaults", "GENE_DICT_FP"))
     snp_dict_fp = os.path.join(os.path.dirname(__file__),
                                        config.get("Defaults", "SNP_DICT_FP"))
-    pathway_db_fp = os.path.join(os.path.dirname(__file__),
-                                       config.get("Defaults", "PATHWAY_DB_FP"))
+    GTEX_CERT = os.path.join(os.path.dirname(__file__),
+                                       config.get("Defaults", "SNP_DICT_FP"))
     GTEX_CERT = os.path.join(os.path.dirname(__file__),
                              config.get("Defaults", "GTEX_CERT"))
     HIC_RESTRICTION_ENZYMES = [e.strip() for e in \
@@ -3032,11 +3197,10 @@ if __name__ == "__main__":
         args.fdr_threshold, args.local_databases_only,
         args.num_processes, args.output_dir, gene_dict_fp, snp_dict_fp,
         suppress_intermediate_files=args.suppress_intermediate_files)
-    snps = produce_summary(
+    genes = produce_summary(
         p_values, snps, genes, gene_database_fp, expression_table_fp,
         args.fdr_threshold, args.output_dir, args.buffer_size_in,
         args.buffer_size_out, args.num_processes_summary)
-    produce_pathway_summary(snps, pathway_db_fp, args.output_dir,
-        args.buffer_size_out, args.num_processes_summary,
-        args.significant_expression)
+    produce_pathway_summary(genes, pathway_db_fp, args.output_dir,
+        args.buffer_size_out, args.significant_expression)
 
