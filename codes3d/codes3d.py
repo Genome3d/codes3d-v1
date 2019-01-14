@@ -2169,7 +2169,9 @@ def reactome(gene):
             for entry in result["entries"]:
                 pathway_ids.add(entry["stId"])
 
+    pathways = {}
     for pathway_id in pathway_ids:
+        pathways[pathway_id] = {}
         response = query("{}/data/query/{}".format(
             reactome_api_url, pathway_id))
 
@@ -2182,6 +2184,7 @@ def reactome(gene):
         pathways[pathway_id]["version"] = response["stIdVersion"].split(".")[1]
 
     reaction_ids = set()
+    reactions_to_pathways = {}
     for pathway_id in pathways:
         response = query("{}/data/pathway/{}/containedEvents/stId".format(
             reactome_api_url, pathway_id))
@@ -2194,7 +2197,8 @@ def reactome(gene):
         reactions_to_pathways[pathway_id] = response_values
         reaction_ids |= response_values
 
-    for reaction_id in reactions:
+    reactions = {}
+    for reaction_id in reaction_ids:
         reactions[reaction_id] = {}
         reactions[reaction_id]["input"] = set()
         reactions[reaction_id]["output"] = set()
