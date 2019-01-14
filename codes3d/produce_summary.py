@@ -36,7 +36,7 @@ if __name__ == "__main__":
             help="Buffer size applied to file output during compilation "+\
             " (default: 1048576).")
     parser.add_argument(
-            "-t", "--num_processes_summary", type=int,
+            "-k", "--num_processes_summary", type=int,
             default=min(psutil.cpu_count(), 32),
             help="The number of processes for compilation of the results " +\
             "(default: %s)." % str(min(psutil.cpu_count(), 32)))
