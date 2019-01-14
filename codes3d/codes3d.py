@@ -38,6 +38,7 @@ from matplotlib.ticker import FuncFormatter
 import rpy2.robjects as R
 import scipy.stats as st
 import base64
+import re
 
 def parse_parameters(restriction_enzymes, include_cell_line, exclude_cell_line):
     """Validate user parameters -r, -n and -x.
@@ -1928,18 +1929,7 @@ def build_eqtl_index(
         print("Tidying up...")
         os.remove(table_fp)
 
-def get_xml_header(text):
-    while text:
-        text = text.lstrip()
-        if text[0:5] == "<?xml" or text[0:9] == "<!DOCTYPE":
-            text = text[text.find(">")+1:]
-            continue
-        elif text[0:4] == "<!--":
-            return text[4:text.find("-->")].strip()
-        else:
-            return None
-
-def query(url, return_xml_header=False):
+def query(url, content_type):
     """Send request to specified URL"""
     while True:
         try:
@@ -1961,7 +1951,6 @@ def query(url, return_xml_header=False):
             logging.error("General Error: %s", url)
             return None
 
-    content_type = response.headers["content-type"].split(";")[0]
 
     if content_type == "application/json":
         try:
@@ -1977,7 +1966,10 @@ def query(url, return_xml_header=False):
             logging.error("Invalid XML content: %s", url)
             content = None
 
-        if "getPathwayAs" in url and content is not None:
+        regex = re.compile("^https://webservice.wikipathways.org/" +\
+                "getPathwayAs\?fileType=gpml&pwId=WP[0-9]+&revision=0$")
+
+        if regex.match(url) and content is not None:
             nsmap = {"ns1": "http://www.wso2.org/php/xsd",
                      "ns2": "http://www.wikipathways.org/webservice"}
             try:
@@ -1991,20 +1983,27 @@ def query(url, return_xml_header=False):
             return content
 
     elif content_type == "text/xml":
+        regex = re.compile("^http://rest.kegg.jp/get/hsa[0-9]+/kgml$")
+        kgml = regex.match(url)
+
         try:
             content = lxml.etree.fromstring(response.text)
         except lxml.etree.XMLSyntaxError:
-            if "kgml" in url:
+            if kgml:
                 logging.error("Invalid KGML content: %s", url)
             else:
                 logging.error("Invalid XML content: %s", url)
             content = None
 
-        if content is not None and return_xml_header:
-            return get_xml_header(response.text), content
+        if content is not None and kgml:
+            try:
+                header = content.xpath("/comment()[1]")[0].text
+            except IndexError:
+                header = None
+            return header, content
         elif content is not None:
             return content
-        elif return_xml_header:
+        elif kgml:
             return None, None
         else:
             return None
@@ -2026,7 +2025,8 @@ def query(url, return_xml_header=False):
 def kegg(gene):
     """Query Kyoto Encyclopedia of Genes and Genomes for HGNC-Gene-ID"""
     kegg_api_url = "http://rest.kegg.jp"
-    response = query("{}/find/genes/{}".format(kegg_api_url, gene))
+    response = query("{}/find/genes/{}".format(kegg_api_url, gene),
+                     "text/plain")
 
     if response is None:
         return []
@@ -2044,7 +2044,8 @@ def kegg(gene):
         return []
 
     pathways = set()
-    response = query("{}/link/pathway/{}".format(kegg_api_url, gene_id))
+    response = query("{}/link/pathway/{}".format(kegg_api_url, gene_id),
+                     "text/plain")
 
     if response is None:
         return []
@@ -2054,7 +2055,8 @@ def kegg(gene):
     pathway_ids = [entry.split("\t")[1] for entry in pathway_entries if entry]
     for pathway_id in pathway_ids:
         pathway_id = pathway_id.split(":")[1]
-        response = query("{}/get/{}".format(kegg_api_url, pathway_id))
+        response = query("{}/get/{}".format(kegg_api_url, pathway_id),
+                         "text/plain")
 
         if response is None:
             continue
@@ -2069,8 +2071,8 @@ def kegg(gene):
                 pathway_name = pathway_name.strip()
                 break
 
-        header_comment, response =\
-            query("{}/get/{}/kgml".format(kegg_api_url, pathway_id), True)
+        header_comment, response = query("{}/get/{}/kgml".format(kegg_api_url,
+                                         pathway_id), "text/xml")
 
         if response is None:
             continue
@@ -2107,35 +2109,47 @@ def kegg(gene):
         downstream_gene_ids.discard("undefined")
 
         if upstream_gene_ids or downstream_gene_ids:
-            genes_str = "+".join(list(upstream_gene_ids | downstream_gene_ids))
-            response = query("{}/list/{}".format(kegg_api_url, genes_str))
-
-            if response is None:
-                continue
+            query_genes = list(upstream_gene_ids | downstream_gene_ids)
+            #Limit URL length to avoid denial of request
+            gene_subsets = [query_genes[i:i+100]
+                            for i in xrange(0, len(query_genes), 100)]
 
             gene_name = {}
-            for entry in [entry.split("\t")
-                        for entry in response[:-1].split("\n")]:
-                gene_name[entry[0]] = entry[1].split(";")[0].split(",")[0]
+            for gene_subset in gene_subsets:
+                genes_str = "+".join(gene_subset)
+                response = query("{}/list/{}".format(kegg_api_url, genes_str),
+                                "text/plain")
+
+                if response is None:
+                    continue
+
+                for entry in [entry.split("\t")
+                              for entry in response[:-1].split("\n")]:
+                    if ";" in entry[1]:
+                        gene_name[entry[0]] =\
+                                entry[1].split(";")[0].split(",")[0]
+                    else:
+                        upstream_gene_ids.discard(entry[0])
+                        downstream_gene_ids.discard(entry[0])
 
             upstream_genes = set(gene_name[gene_id]
-                                for gene_id in upstream_gene_ids)
+                                 for gene_id in upstream_gene_ids)
             downstream_genes = set(gene_name[gene_id]
-                                for gene_id in downstream_gene_ids)
+                                   for gene_id in downstream_gene_ids)
         else:
             upstream_genes, downstream_genes = set(), set()
 
         months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul",
                   "Aug", "Sep", "Oct", "Nov", "Dec"]
 
-        if (header_comment is not None and
-            "Creation date: " in header_comment and
-            len(header_comment.split(" ")) > 4 and
-            header_comment.split(" ")[2] in months):
+        if (header_comment and
+            header_comment.startswith(" Creation date: ") and
+            len(header_comment.split(" ")) > 5 and
+            header_comment.split(" ")[3] in months):
             header_comment = header_comment.split(" ")
-            month = str(months.index(header_comment[2]) + 1)
-            day = header_comment[3].replace(",", "")
-            year = header_comment[4]
+            month = str(months.index(header_comment[3]) + 1)
+            day = header_comment[4].replace(",", "")
+            year = header_comment[5]
             pathway_version = "-".join([year, month, day])
         else:
             pathway_version = "NA"
@@ -2157,7 +2171,7 @@ def reactome(gene):
 
     response = query(
         "{}/search/query?query={}&species=Homo%%20sapiens&cluster=true".format(
-            reactome_api_url, gene))
+            reactome_api_url, gene), "application/json")
 
     if response is None or "results" not in response:
         return []
@@ -2173,7 +2187,7 @@ def reactome(gene):
     for pathway_id in pathway_ids:
         pathways[pathway_id] = {}
         response = query("{}/data/query/{}".format(
-            reactome_api_url, pathway_id))
+            reactome_api_url, pathway_id), "application/json")
 
         if response is None:
             del pathways[pathway_id]
@@ -2187,7 +2201,7 @@ def reactome(gene):
     reactions_to_pathways = {}
     for pathway_id in pathways:
         response = query("{}/data/pathway/{}/containedEvents/stId".format(
-            reactome_api_url, pathway_id))
+            reactome_api_url, pathway_id), "text/plain")
 
         if response is None:
             continue
@@ -2204,7 +2218,7 @@ def reactome(gene):
         reactions[reaction_id]["output"] = set()
 
         response = query("{}/data/query/{}".format(
-            reactome_api_url, reaction_id))
+            reactome_api_url, reaction_id), "application/json")
 
         if response is None:
             continue
@@ -2253,15 +2267,22 @@ def reactome(gene):
 
 def wikipathways(gene, exclude_reactome=True):
     """Query WikiPathways for HGNC-Gene-ID"""
-    reactome_reference_suffix = "reactome.org/PathwayBrowser/#DIAGRAM="
     wikipathways_api_url = "https://webservice.wikipathways.org"
-    nsmap = {"ns1": "http://www.wso2.org/php/xsd",
-             "ns2": "http://www.wikipathways.org/webservice",
-             "gpml": "http://pathvisio.org/GPML/2013a"}
+    nsmap = {
+            "ns1": "http://www.wso2.org/php/xsd",
+            "ns2": "http://www.wikipathways.org/webservice",
+            "gpml": "http://pathvisio.org/GPML/2013a"}
+    discard_tags = {
+            "Curation:Tutorial",
+            "Curation:UnderConstruction",
+            "Curation:Hypothetical"}
+
+    if exclude_reactome:
+        discard_tags.add("Curation:Reactome_Approved")
 
     response = query(
         "{}/findPathwaysByText?query={}&species=Homo_sapiens".format(
-            wikipathways_api_url, gene))
+            wikipathways_api_url, gene), "application/xml")
 
     if response is None:
         return []
@@ -2276,24 +2297,23 @@ def wikipathways(gene, exclude_reactome=True):
         pathway["output"] = set()
         pathways.append(pathway)
 
-    if exclude_reactome:
-        for pathway in pathways[:]:
-            response = query("{}/getCurationTags?pwId={}".format(
-                             wikipathways_api_url, pathway["id"]))
+    for pathway in pathways[:]:
+        response = query("{}/getCurationTags?pwId={}".format(
+                            wikipathways_api_url, pathway["id"]),
+                            "application/xml")
 
-            if response is None:
-                continue
+        if response is None:
+            continue
 
-            for tag in response.findall("ns1:tags", nsmap):
-                if (tag.find("ns2:name", nsmap).text ==
-                        "Curation:Reactome_Approved"):
-                    pathways.remove(pathway)
-                    break
+        for tag in response.findall("ns1:tags", nsmap):
+            if tag.find("ns2:name", nsmap).text in discard_tags:
+                pathways.remove(pathway)
+                break
 
     for pathway in pathways:
         response = query(
                 "{}/getPathwayAs?fileType=gpml&pwId={}&revision=0".format(
-                wikipathways_api_url, pathway["id"]))
+                wikipathways_api_url, pathway["id"]), "application/xml")
 
         if response is None:
             continue
@@ -2382,7 +2402,7 @@ def wikipathways(gene, exclude_reactome=True):
 def log_kegg_release():
     """Write KEGG release information to log file"""
     kegg_info_url = "http://rest.kegg.jp/info/pathway"
-    response = query(kegg_info_url)
+    response = query(kegg_info_url, "text/plain")
 
     if response is None:
         logging.info("KEGG version: NA")
@@ -2400,7 +2420,7 @@ def log_reactome_release():
     reactome_info_url =\
         "https://reactome.org/ContentService/data/database/version"
 
-    release = query(reactome_info_url)
+    release = query(reactome_info_url, "text/plain")
     logging.info("Reactome version: %s", release)
 
     return None
@@ -2408,7 +2428,7 @@ def log_reactome_release():
 def log_wikipathways_release():
     """Write WikiPathways release information to log file"""
     wikipathways_info_url = "http://data.wikipathways.org/"
-    response = query(wikipathways_info_url)
+    response = query(wikipathways_info_url, "text/html")
 
     if response is None:
         logging.info("WikiPathways version: NA")
@@ -2423,7 +2443,7 @@ def log_wikipathways_release():
 
     return None
 
-def standardize(exp):
+def normalize_distribution(exp):
     tissues = exp.keys()
 
     mean = sum([exp[tissue] for tissue in tissues])/len(tissues)
@@ -2596,7 +2616,7 @@ def build_expression_table(
 
     pool = multiprocessing.Pool(processes=3)
     for i, gene in enumerate([gene for gene in genes if gene in gene_exp], 1):
-        exp = pool.map(standardize,
+        exp = pool.map(normalize_distribution,
                 [gene_exp[gene], peptide_exp[gene], protein_exp[gene]])
         for tissue in sorted(tissues):
             pathway_db_cursor.execute("""
@@ -2630,10 +2650,10 @@ def build_expression_table(
                 exp[2][tissue][1],
                 exp[2][tissue][2]])
 
+        pathway_db.commit()
         gene_num.update(i)
 
     pool.close()
-    pathway_db.commit()
     tsv_file.close()
 
     return None
@@ -2828,13 +2848,14 @@ def build_pathway_db(
                 else:
                     downstream = "NA"
 
+
                 tsv_line.extend([upstream, downstream])
                 tsv_writer.writerow(tsv_line)
 
+        pathway_db.commit()
         input_gene_num.update(i)
 
     pool.close()
-    pathway_db.commit()
     tsv_file.close()
 
 

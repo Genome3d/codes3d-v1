@@ -1,8 +1,8 @@
-.gitignore
 *.pyc
 lib/
 lib
 codes3d_summary/
 codes3d_pathway_summary/
 codes3d_output/
-
+codes3d/test_pathway_db_queries.py
+.gitignore
