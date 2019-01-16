@@ -2277,19 +2277,19 @@ def reactome(gene):
                     pathways[pathway_id]["name"],
                     tuple(sorted(list(pathways[pathway_id]["input"]))),
                     tuple(sorted(list(pathways[pathway_id]["output"]))))
-                for pathway_id in pathways)
+                   for pathway_id in pathways)
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
 def adjust_name(gene_name):
-    c_orf = "^C([1-9]|1[0-9]|2[0-2]|X|Y|MT)orf[0-9]+$"
+    c_orf_ = "^C([1-9]|1[0-9]|2[0-2]|X|Y|MT)orf[0-9]+$"
 
-    if not re.match(c_orf, gene_name):
+    if not re.match(c_orf_, gene_name):
         gene_name = gene_name.upper()
 
     return gene_name
 
-def wikipathways(gene, exclude_reactome=True):
+def wikipathways(gene, exclude_reactome=True, exclude_homology_mappings=True):
     """Query WikiPathways for HGNC-Gene-ID"""
     wikipathways_api_url = "https://webservice.wikipathways.org"
     nsmap = {
@@ -2336,7 +2336,7 @@ def wikipathways(gene, exclude_reactome=True):
                 pathways.remove(pathway)
                 break
 
-    for pathway in pathways:
+    for pathway in pathways[:]:
         response = request(
                 "{}/getPathwayAs?fileType=gpml&pwId={}&revision=0".format(
                 wikipathways_api_url, pathway["id"]), "application/xml")
@@ -2344,59 +2344,69 @@ def wikipathways(gene, exclude_reactome=True):
         if response is None:
             continue
 
-        group_to_graph = {}
-        graph_to_group = {}
+        homology = False
+        if exclude_homology_mappings:
+            for comment in response.findall("gpml:Comment", nsmap):
+                if comment.get("Source") == "HomologyMapper":
+                    homology = True
+                    break
+        if homology:
+            pathways.remove(pathway)
+            continue
+
+        group_to_graph, graph_to_group = {}, {}
         for group in response.findall("gpml:Group", nsmap):
-            if "GraphId" in group.attrib:
-                group_id = group.attrib["GroupId"]
-                graph_id = group.attrib["GraphId"]
+            group_id = group.get("GroupId")
+            graph_id = group.get("GraphId")
+            if graph_id:
                 group_to_graph[group_id] = graph_id
                 graph_to_group[graph_id] = group_id
 
         graph_ids = set()
         for data_node in response.findall("gpml:DataNode", nsmap):
+
             if data_node.attrib["TextLabel"] == gene:
-                if "GraphId" in data_node.attrib:
-                    graph_ids.add(data_node.attrib["GraphId"])
-                if "GroupRef" in data_node.attrib:
-                    group_ref = data_node.attrib["GroupRef"]
-                    if group_ref in group_to_graph:
-                        graph_ids.add(group_to_graph[group_ref])
+                graph_id = data_node.get("GraphId")
+                if graph_id:
+                    graph_ids.add(graph_id)
+
+                group_ref = data_node.get("GroupRef")
+                if group_ref in group_to_graph:
+                    graph_ids.add(group_to_graph[group_ref])
 
         input_ids = {"non-group": set(), "group": set()}
         output_ids = {"non-group": set(), "group": set()}
+
         for interaction in response.findall("gpml:Interaction", nsmap):
             points = interaction.find("gpml:Graphics", nsmap).findall(
-                "gpml:Point", nsmap)
-            if ("GraphRef" in points[0].attrib and
-                "GraphRef" in points[1].attrib):
-                input_ref = points[0].attrib["GraphRef"]
-                output_ref = points[1].attrib["GraphRef"]
-                if input_ref in graph_ids:
-                    if output_ref in graph_to_group:
-                        output_ids["group"].add(graph_to_group[output_ref])
-                    else:
-                        output_ids["non-group"].add(output_ref)
-                if output_ref in graph_ids:
-                    if input_ref in graph_to_group:
-                        input_ids["group"].add(graph_to_group[input_ref])
-                    else:
-                        input_ids["non-group"].add(input_ref)
+                        "gpml:Point", nsmap)
+
+            input_ref = points[0].get("GraphRef")
+            output_ref = points[1].get("GraphRef")
+
+            if input_ref in graph_ids:
+                if output_ref in graph_to_group:
+                    output_ids["group"].add(graph_to_group[output_ref])
+                else:
+                    output_ids["non-group"].add(output_ref)
+
+            if output_ref in graph_ids:
+                if input_ref in graph_to_group:
+                    input_ids["group"].add(graph_to_group[input_ref])
+                else:
+                    input_ids["non-group"].add(input_ref)
 
         if (input_ids["non-group"] or input_ids["group"] or
-                output_ids["non-group"] or output_ids["group"]):
-            for data_node in response.findall("gpml:DataNode", nsmap):
-                if ("Type" in data_node.attrib and
-                    data_node.attrib["Type"] == "GeneProduct"):
-                    graph_id, group_ref = None, None
+            output_ids["non-group"] or output_ids["group"]):
 
-                    if "GraphId" in data_node.attrib:
-                        graph_id = data_node.attrib["GraphId"]
-                    if "GroupRef" in data_node.attrib:
-                        group_ref = data_node.attrib["GroupRef"]
+            for data_node in response.findall("gpml:DataNode", nsmap):
+
+                if data_node.get("Type") == "GeneProduct":
+                    graph_id = data_node.get("GraphId")
+                    group_ref = data_node.get("GroupRef")
 
                     if graph_id or group_ref:
-                        text_label = data_node.attrib["TextLabel"]
+                        text_label = adjust_name(data_node.attrib["TextLabel"])
 
                         if (not isinstance(text_label, str) or
                             text_label == gene):
@@ -2404,13 +2414,11 @@ def wikipathways(gene, exclude_reactome=True):
 
                         if (graph_id in input_ids["non-group"] or
                             group_ref in input_ids["group"]):
-                            pathway["input"].add(
-                                    unicode(adjust_name(text_label), "utf-8"))
+                            pathway["input"].add(unicode(text_label, "utf-8"))
 
                         if (graph_id in output_ids["non-group"] or
                             group_ref in output_ids["group"]):
-                            pathway["output"].add(
-                                    unicode(adjust_name(text_label), "utf-8"))
+                            pathway["output"].add(unicode(text_label, "utf-8"))
 
     pathways = set((unicode(gene, "utf-8"),
                     unicode("WikiPathways", "utf-8"),
@@ -2419,7 +2427,7 @@ def wikipathways(gene, exclude_reactome=True):
                     unicode(pathway["name"], "utf-8"),
                     tuple(sorted(list(pathway["input"]))),
                     tuple(sorted(list(pathway["output"]))))
-                for pathway in pathways)
+                   for pathway in pathways)
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
@@ -2445,7 +2453,10 @@ def log_reactome_release():
         "https://reactome.org/ContentService/data/database/version"
 
     release = request(reactome_info_url, "text/plain")
-    logging.info("Reactome version: %s", release)
+    if not release:
+        logging.info("Reactome version: NA")
+    else:
+        logging.info("Reactome version: %s", release)
 
     return None
 
@@ -2585,9 +2596,9 @@ def build_expression_table(
         protein_exp = {}
         for gene in accessions:
             protein_exp[gene] = {tissue: sum(
-                                [accession_exp[accession][tissue]])
-                                for accession in accessions[gene]
-                                for tissue in accession_exp[accession]}
+                                 [accession_exp[accession][tissue]])
+                                 for accession in accessions[gene]
+                                 for tissue in accession_exp[accession]}
 
         tissues = tissues.values()
         num_tissues = len(tissues)
@@ -2722,7 +2733,7 @@ def build_pathway_db(
 
     num_input_genes = len(input_genes)
     if num_input_genes:
-        print("Pathways for Gene:")
+        print("Pathways for gene:")
         input_gene_num = progressbar.ProgressBar(max_value=num_input_genes)
         input_gene_num.update(0)
 
@@ -2856,8 +2867,7 @@ def build_pathway_db(
                         """, (pathway[1], pathway[2], pathway[0],
                             downstream_gene))
 
-                tsv_row = [entry.encode("utf-8")
-                           for entry in pathway[:5]]
+                tsv_row = [entry.encode("utf-8") for entry in pathway[:5]]
 
                 up_down_stream_genes = set(pathway[5]) | set(pathway[6])
 
