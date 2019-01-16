@@ -1968,10 +1968,10 @@ def request(url, content_type):
             logging.error("Invalid XML content: %s", url)
             content = None
 
-        reg = re.compile("^https://webservice.wikipathways.org/" +\
-                "getPathwayAs\?fileType=gpml&pwId=WP[0-9]+&revision=0$")
+        reg = "https://webservice.wikipathways.org/" +\
+              "getPathwayAs\?fileType=gpml&pwId=WP[0-9]+&revision=0"
 
-        if reg.match(url) and content is not None:
+        if re.match(reg, url) and content is not None:
             nsmap = {"ns1": "http://www.wso2.org/php/xsd",
                      "ns2": "http://www.wikipathways.org/webservice"}
             try:
@@ -1985,8 +1985,8 @@ def request(url, content_type):
             return content
 
     elif content_type == "text/xml":
-        reg = re.compile("^http://rest.kegg.jp/get/hsa[0-9]+/kgml$")
-        kgml = reg.match(url)
+        reg = "http://rest.kegg.jp/get/hsa[0-9]+/kgml"
+        kgml = re.match(reg, url)
 
         try:
             content = lxml.etree.fromstring(response.text)
@@ -2073,87 +2073,95 @@ def kegg(gene):
                 pathway_name = pathway_name.strip()
                 break
 
-        header_comment, response = request(
-                "{}/get/{}/kgml".format(kegg_api_url, pathway_id), "text/xml")
+        response = request("{}/get/{}/kgml".format(kegg_api_url, pathway_id),
+                           "text/xml")
 
         if response is None:
-            continue
-
-        entry_ids = set()
-        for entry in response.findall("entry"):
-            if (entry.get("type") == "gene" and
-                    gene_id in entry.get("name").split(" ")):
-                entry_ids.add(entry.get("id"))
-
-        upstream_entry_ids = set()
-        downstream_entry_ids = set()
-        for relation in response.findall("relation"):
-            if relation.get("type") == "PPrel":
-                if relation.get("entry1") in entry_ids:
-                    downstream_entry_ids.add(relation.get("entry2"))
-
-                if relation.get("entry2") in entry_ids:
-                    upstream_entry_ids.add(relation.get("entry1"))
-
-        upstream_gene_ids = set()
-        downstream_gene_ids = set()
-        for entry in response.findall("entry"):
-            if (entry.get("id") in upstream_entry_ids and
-                    entry.get("type") == "gene"):
-               upstream_gene_ids |= set(entry.get("name").split(" "))
-            if (entry.get("id") in downstream_entry_ids and
-                    entry.get("type") == "gene"):
-               downstream_gene_ids |= set(entry.get("name").split(" "))
-
-        upstream_gene_ids -= {gene_id, "undefined"}
-        downstream_gene_ids -= {gene_id, "undefined"}
-
-        if upstream_gene_ids or downstream_gene_ids:
-            query_genes = list(upstream_gene_ids | downstream_gene_ids)
-
-            # Limitation of URL length avoiding denial of request
-            gene_subsets = [query_genes[i:i+100]
-                            for i in xrange(0, len(query_genes), 100)]
-
-            gene_name = {}
-            for gene_subset in gene_subsets:
-                genes_str = "+".join(gene_subset)
-                response = request("{}/list/{}".format(kegg_api_url, genes_str),
-                                "text/plain")
-
-                if response is None:
-                    continue
-
-                for entry in [entry.split("\t")
-                              for entry in response[:-1].split("\n")]:
-                    if ";" in entry[1]:
-                        gene_name[entry[0]] =\
-                                entry[1].split(";")[0].split(",")[0]
-                    else:
-                        upstream_gene_ids.discard(entry[0])
-                        downstream_gene_ids.discard(entry[0])
-
-            upstream_genes = set(gene_name[gene_id]
-                                 for gene_id in upstream_gene_ids)
-            downstream_genes = set(gene_name[gene_id]
-                                   for gene_id in downstream_gene_ids)
-        else:
+            pathway_version = unicode("NA")
             upstream_genes, downstream_genes = set(), set()
 
-        months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul",
-                  "Aug", "Sep", "Oct", "Nov", "Dec"]
-
-        if (header_comment and
-            header_comment.startswith(" Creation date: ") and
-            len(header_comment.split(" ")) > 5 and
-            header_comment.split(" ")[3] in months):
-            header_comment = header_comment.split(" ")
-            month = str(months.index(header_comment[3]) + 1)
-            day = header_comment[4].replace(",", "")
-            year = header_comment[5]
-            pathway_version = "-".join([year, month, day])
         else:
-            pathway_version = "NA"
+            header_comment, response = response
+
+            entry_ids = set()
+            for entry in response.findall("entry"):
+                if (entry.get("type") == "gene" and
+                        gene_id in entry.get("name").split(" ")):
+                    entry_ids.add(entry.get("id"))
+
+            upstream_entry_ids = set()
+            downstream_entry_ids = set()
+            for relation in response.findall("relation"):
+                if relation.get("type") == "PPrel":
+                    if relation.get("entry1") in entry_ids:
+                        downstream_entry_ids.add(relation.get("entry2"))
+
+                    if relation.get("entry2") in entry_ids:
+                        upstream_entry_ids.add(relation.get("entry1"))
+
+            upstream_gene_ids = set()
+            downstream_gene_ids = set()
+            for entry in response.findall("entry"):
+                if (entry.get("id") in upstream_entry_ids and
+                        entry.get("type") == "gene"):
+                    upstream_gene_ids |= set(entry.get("name").split(" "))
+                if (entry.get("id") in downstream_entry_ids and
+                        entry.get("type") == "gene"):
+                    downstream_gene_ids |= set(entry.get("name").split(" "))
+
+            upstream_gene_ids.discard("undefined")
+            downstream_gene_ids.discard("undefined")
+
+            if upstream_gene_ids or downstream_gene_ids:
+                query_genes = list(upstream_gene_ids | downstream_gene_ids)
+
+                # Limitation of URL length avoiding denial of request
+                gene_subsets = [query_genes[i:i+100]
+                                for i in xrange(0, len(query_genes), 100)]
+
+                gene_name = {}
+                for gene_subset in gene_subsets:
+                    genes_str = "+".join(gene_subset)
+                    response = request("{}/list/{}".format(kegg_api_url,
+                                    genes_str), "text/plain")
+
+                    if response is None:
+                        continue
+
+                    for entry in [entry.split("\t")
+                                for entry in response[:-1].split("\n")]:
+                        if ";" in entry[1]:
+                            gene_name[entry[0]] =\
+                                    entry[1].split(";")[0].split(",")[0]
+                        else:
+                            upstream_gene_ids.discard(entry[0])
+                            downstream_gene_ids.discard(entry[0])
+
+                upstream_genes = set(gene_name[gene_id]
+                                    for gene_id in upstream_gene_ids)
+                downstream_genes = set(gene_name[gene_id]
+                                    for gene_id in downstream_gene_ids)
+
+                upstream_genes.discard(gene)
+                downstream_genes.discard(gene)
+
+            else:
+                upstream_genes, downstream_genes = set(), set()
+
+            months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul",
+                    "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+            if (header_comment and
+                header_comment.startswith(" Creation date: ") and
+                len(header_comment.split(" ")) > 5 and
+                header_comment.split(" ")[3] in months):
+                header_comment = header_comment.split(" ")
+                month = str(months.index(header_comment[3]) + 1)
+                day = header_comment[4].replace(",", "")
+                year = header_comment[5]
+                pathway_version = "-".join([year, month, day])
+            else:
+                pathway_version = "NA"
 
         pathways.add((unicode(gene, "utf-8"),
                       unicode("KEGG", "utf-8"),
@@ -2165,6 +2173,11 @@ def kegg(gene):
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
+def strip_modifications(gene_name):
+    mod = "p-(A|C|D|E|F|G|H|I|K|L|M|N|P|Q|R|S|T|V|W|X|Y)[0-9]+-[A-Z0-9]+"
+    if re.match(mod, gene_name):
+        gene_name = "-".join(gene_name.split("-")[2:])
+    return gene_name
 
 def reactome(gene):
     """Query Reactome for HGNC-Gene-ID"""
@@ -2230,8 +2243,8 @@ def reactome(gene):
                         metabolite["className"] == "Protein"):
                     name = metabolite["displayName"]
                     name = name.split(" [")[0].split("(")[0]
-                    name = name.split("-")[-1]
-                    reactions[reaction_id]["input"].add(name)
+                    reactions[reaction_id]["input"].add(
+                            strip_modifications(name))
 
         if "output" in response:
             for metabolite in response["output"]:
@@ -2239,8 +2252,8 @@ def reactome(gene):
                         metabolite["className"] == "Protein"):
                     name = metabolite["displayName"]
                     name = name.split(" [")[0].split("(")[0]
-                    name = name.split("-")[-1]
-                    reactions[reaction_id]["output"].add(name)
+                    reactions[reaction_id]["output"].add(
+                            strip_modifications(name))
 
     for pathway_id in pathways:
         pathways[pathway_id]["input"] = set()
@@ -2296,8 +2309,10 @@ def wikipathways(gene, exclude_reactome=True):
         pathway["id"] = result.find("ns2:id", nsmap).text
         pathway["revision"] = result.find("ns2:revision", nsmap).text
         pathway["name"] = result.find("ns2:name", nsmap).text
+
         pathway["input"] = set()
         pathway["output"] = set()
+
         pathways.append(pathway)
 
     for pathway in pathways[:]:
@@ -2497,7 +2512,7 @@ def build_expression_table(
         num_genes_expr = len(gene_exp)
         coverage = " ({:.2f}%)".format((num_genes_expr/num_genes)*100)
 
-        print("Expression data for gene...")
+        print("Expression for gene:")
         gene_num = progressbar.ProgressBar(max_value=num_genes_expr)
         gene_num.update(0)
 
@@ -2697,7 +2712,7 @@ def build_pathway_db(
 
     num_input_genes = len(input_genes)
     if num_input_genes:
-        print("Pathway data for gene...")
+        print("Pathways for Gene:")
         input_gene_num = progressbar.ProgressBar(max_value=num_input_genes)
         input_gene_num.update(0)
 
@@ -2708,8 +2723,9 @@ def build_pathway_db(
                   "Pathway",
                   "Pathway_Version",
                   "Pathway_Name",
-                  "Upstream_Genes",
-                  "Downstream_Genes"]
+                  "Up_Down_Stream_Gene",
+                  "Upstream",
+                  "Downstream"]
     tsv_writer.writerow(tsv_header)
 
     pathway_db_cursor.execute("""
@@ -2832,24 +2848,33 @@ def build_pathway_db(
                         """, (pathway[1], pathway[2], pathway[0],
                             downstream_gene))
 
+                tsv_row = [entry.encode("utf-8")
+                           for entry in pathway[:5]]
 
-                tsv_line = [entry.encode("utf-8") for entry in pathway[:5]]
+                up_down_stream_genes = set(pathway[5]) | set(pathway[6])
 
-                if pathway[5]:
-                    upstream = ", ".join(
-                        [entry.encode("utf-8") for entry in pathway[5]])
+                if not up_down_stream_genes:
+                    tsv_writer.writerow([
+                            tsv_row[0],
+                            tsv_row[1],
+                            tsv_row[2],
+                            tsv_row[3],
+                            tsv_row[4],
+                            "NA",
+                            False,
+                            False])
+
                 else:
-                    upstream = "NA"
-
-                if pathway[6]:
-                    downstream = ", ".join(
-                        [entry.encode("utf-8") for entry in pathway[6]])
-                else:
-                    downstream = "NA"
-
-
-                tsv_line.extend([upstream, downstream])
-                tsv_writer.writerow(tsv_line)
+                    for up_down_stream_gene in sorted(up_down_stream_genes):
+                        tsv_writer.writerow([
+                                tsv_row[0],
+                                tsv_row[1],
+                                tsv_row[2],
+                                tsv_row[3],
+                                tsv_row[4],
+                                up_down_stream_gene.encode("utf-8"),
+                                up_down_stream_gene in pathway[5],
+                                up_down_stream_gene in pathway[6]])
 
         pathway_db.commit()
         input_gene_num.update(i)
