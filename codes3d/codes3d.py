@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 from __future__ import print_function, division
 import itertools
 import argparse
@@ -2296,6 +2298,7 @@ def wikipathways(gene, exclude_reactome=True, exclude_homology_mappings=True):
             "ns1": "http://www.wso2.org/php/xsd",
             "ns2": "http://www.wikipathways.org/webservice",
             "gpml": "http://pathvisio.org/GPML/2013a"}
+
     discard_tags = {
             "Curation:Tutorial",
             "Curation:UnderConstruction",
@@ -2401,7 +2404,9 @@ def wikipathways(gene, exclude_reactome=True, exclude_homology_mappings=True):
 
             for data_node in response.findall("gpml:DataNode", nsmap):
 
-                if data_node.get("Type") == "GeneProduct":
+                if (data_node.get("Type") == "GeneProduct" and
+                    data_node.find("gpml:Xref", nsmap).get("Database") and
+                    data_node.find("gpml:Xref", nsmap).get("ID")):
                     graph_id = data_node.get("GraphId")
                     group_ref = data_node.get("GroupRef")
 
@@ -2533,7 +2538,7 @@ def build_expression_table(
         num_genes_expr = len(gene_exp)
         coverage = " ({:.2f}%)".format((num_genes_expr/num_genes)*100)
 
-        print("Expression for gene:")
+        print()
         gene_num = progressbar.ProgressBar(max_value=num_genes_expr)
         gene_num.update(0)
 
@@ -2733,7 +2738,6 @@ def build_pathway_db(
 
     num_input_genes = len(input_genes)
     if num_input_genes:
-        print("Pathways for gene:")
         input_gene_num = progressbar.ProgressBar(max_value=num_input_genes)
         input_gene_num.update(0)
 
