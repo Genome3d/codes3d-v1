@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 from __future__ import print_function, division
 import itertools
 import argparse
@@ -2814,7 +2812,7 @@ def build_pathway_db(
     log_wikipathways_release()
 
     logging.info("Number of input genes: %s", num_input_genes)
-    up_down_stream_genes = set()
+    all_up_down_stream_genes = set()
     num_pathways_available = 0
 
     pool = multiprocessing.Pool(processes=3)
@@ -2841,7 +2839,6 @@ def build_pathway_db(
                     """, (pathway[1], pathway[2], pathway[4]))
 
                 for upstream_gene in pathway[5]:
-                    up_down_stream_genes.add(upstream_gene)
                     pathway_db_cursor.execute("""
                         INSERT INTO
                             UpstreamGenes
@@ -2851,7 +2848,6 @@ def build_pathway_db(
                             upstream_gene))
 
                 for downstream_gene in pathway[6]:
-                    up_down_stream_genes.add(downstream_gene)
                     pathway_db_cursor.execute("""
                         INSERT INTO
                             DownstreamGenes
@@ -2888,6 +2884,8 @@ def build_pathway_db(
                                 up_down_stream_gene in pathway[5],
                                 up_down_stream_gene in pathway[6]])
 
+                    all_up_down_stream_genes |= up_down_stream_genes
+
         pathway_db.commit()
         input_gene_num.update(i)
 
@@ -2903,8 +2901,9 @@ def build_pathway_db(
     logging.info("Number of input genes covered by pathway data: %s%s",
         num_pathways_available, coverage)
 
-    input_genes.extend(sorted([gene for gene in up_down_stream_genes
+    input_genes.extend(sorted([gene for gene in all_up_down_stream_genes
                                if gene not in input_genes]))
+
     num_genes = len(input_genes)
     logging.info("Number of genes including up- and downstream genes: %s",
         num_genes)
