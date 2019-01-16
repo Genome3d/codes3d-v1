@@ -1968,8 +1968,8 @@ def request(url, content_type):
             logging.error("Invalid XML content: %s", url)
             content = None
 
-        reg = "https://webservice.wikipathways.org/" +\
-              "getPathwayAs\?fileType=gpml&pwId=WP[0-9]+&revision=0"
+        reg = "^https://webservice.wikipathways.org/" +\
+              "getPathwayAs\?fileType=gpml&pwId=WP[0-9]+&revision=0$"
 
         if re.match(reg, url) and content is not None:
             nsmap = {"ns1": "http://www.wso2.org/php/xsd",
@@ -1985,7 +1985,7 @@ def request(url, content_type):
             return content
 
     elif content_type == "text/xml":
-        reg = "http://rest.kegg.jp/get/hsa[0-9]+/kgml"
+        reg = "^http://rest.kegg.jp/get/hsa[0-9]+/kgml$"
         kgml = re.match(reg, url)
 
         try:
@@ -2174,9 +2174,11 @@ def kegg(gene):
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
 def strip_modifications(gene_name):
-    mod = "p-(A|C|D|E|F|G|H|I|K|L|M|N|P|Q|R|S|T|V|W|X|Y)[0-9]+-[A-Z0-9]+"
+    mod = "^p-(A|C|D|E|F|G|H|I|K|L|M|N|P|Q|R|S|T|V|W|X|Y)[0-9]+-[A-Z0-9]+$"
+
     if re.match(mod, gene_name):
         gene_name = "-".join(gene_name.split("-")[2:])
+
     return gene_name
 
 def reactome(gene):
@@ -2280,6 +2282,14 @@ def reactome(gene):
                 for pathway_id in pathways)
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
+
+def adjust_name(gene_name):
+    c_orf = "^C([1-9]|1[0-9]|2[0-2]|X|Y|MT)orf[0-9]+$"
+
+    if not re.match(c_orf, gene_name):
+        gene_name = gene_name.upper()
+
+    return gene_name
 
 def wikipathways(gene, exclude_reactome=True):
     """Query WikiPathways for HGNC-Gene-ID"""
@@ -2396,11 +2406,13 @@ def wikipathways(gene, exclude_reactome=True):
 
                         if (graph_id in input_ids["non-group"] or
                             group_ref in input_ids["group"]):
-                            pathway["input"].add(unicode(text_label, "utf-8"))
+                            pathway["input"].add(
+                                    unicode(adjust_name(text_label), "utf-8"))
 
                         if (graph_id in output_ids["non-group"] or
                             group_ref in output_ids["group"]):
-                            pathway["output"].add(unicode(text_label, "utf-8"))
+                            pathway["output"].add(
+                                    unicode(adjust_name(text_label), "utf-8"))
 
     pathways = set((unicode(gene, "utf-8"),
                     unicode("WikiPathways", "utf-8"),
