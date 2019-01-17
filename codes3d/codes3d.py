@@ -2173,9 +2173,7 @@ def kegg(gene):
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
-def strip_modifications(gene_name):
-    mod = "^p-(A|C|D|E|F|G|H|I|K|L|M|N|P|Q|R|S|T|V|W|X|Y)[0-9]+-[A-Z0-9]+$"
-
+def reactome_modifications(gene_name):
     if re.match(mod, gene_name):
         gene_name = "-".join(gene_name.split("-")[2:])
 
@@ -2246,7 +2244,7 @@ def reactome(gene):
                     name = metabolite["displayName"]
                     name = name.split(" [")[0].split("(")[0]
                     reactions[reaction_id]["input"].add(
-                            strip_modifications(name))
+                            reactome_modifications(name))
 
         if "output" in response:
             for metabolite in response["output"]:
@@ -2255,7 +2253,7 @@ def reactome(gene):
                     name = metabolite["displayName"]
                     name = name.split(" [")[0].split("(")[0]
                     reactions[reaction_id]["output"].add(
-                            strip_modifications(name))
+                            reactome_modifications(name))
 
     for pathway_id in pathways:
         pathways[pathway_id]["input"] = set()
@@ -2283,10 +2281,28 @@ def reactome(gene):
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
-def adjust_name(gene_name):
-    c_orf_ = "^C([1-9]|1[0-9]|2[0-2]|X|Y|MT)orf[0-9]+$"
+def compile_re():
+    global mod, c_orf_, mod_prefix, mod_suffix, infix
 
-    if not re.match(c_orf_, gene_name):
+    # reactome_modifications()
+    mod = "^p-(A|C|D|E|F|G|H|I|K|L|M|N|P|Q|R|S|T|V|W|X|Y)[0-9]+-[A-Z0-9]+$"
+
+    # wikipathways_modifications()
+    c_orf_ = re.compile("^C([1-9]|1[0-9]|2[0-2]|X|Y|MT)orf[0-9]+$")
+    mod_prefix = re.compile("^(c|c-)[A-Z]+([A-Z]|[0-9])*")
+    mod_suffix = re.compile("[A-Z]+([A-Z]|[0-9])*(m/n|n)+$")
+    infix = re.compile("[A-Z]+([A-Z]|[0-9])*")
+
+    return None
+
+def wikipathways_modifications(gene_name):
+    if mod_prefix.match(gene_name):
+        gene_name = infix.search(gene_name).group(0)
+
+    if mod_suffix.match(gene_name):
+        gene_name = infix.search(gene_name).group(0)
+
+    if not c_orf_.match(gene_name):
         gene_name = gene_name.upper()
 
     return gene_name
@@ -2411,7 +2427,8 @@ def wikipathways(gene, exclude_reactome=True, exclude_homology_mappings=True):
                     group_ref = data_node.get("GroupRef")
 
                     if graph_id or group_ref:
-                        text_label = adjust_name(data_node.attrib["TextLabel"])
+                        text_label = wikipathways_modifications(
+                                data_node.attrib["TextLabel"])
 
                         if (not isinstance(text_label, str) or
                             text_label == gene):
@@ -2724,10 +2741,10 @@ def build_pathway_db(
         format="%(levelname)s\t%(asctime)s\t%(message)s",
         datefmt="%Y-%m-%d %H:%M:%S")
 
+    logging.info("Build started.")
+
     pathway_db = sqlite3.connect(pathway_db_tmp_fp)
     pathway_db_cursor = pathway_db.cursor()
-
-    logging.info("Build started.")
 
     input_genes = []
     with open(hgnc_gene_sym_fp, "r") as hgnc_gene_file:
@@ -2827,6 +2844,8 @@ def build_pathway_db(
     log_wikipathways_release()
 
     logging.info("Number of input genes: %s", num_input_genes)
+
+    compile_re()
     all_up_down_stream_genes = set()
     num_pathways_available = 0
 
