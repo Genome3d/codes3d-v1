@@ -1945,10 +1945,6 @@ def request(url, content_type):
             logging.error("Connection failure: %s", url)
             time.sleep(60)
             continue
-        except OpenSSL.SSL.ZeroReturnError:
-            logging.error("SSL connection closed: %s", url)
-            time.sleep(60)
-            continue
         except requests.exceptions.RequestException:
             logging.error("General Error: %s", url)
             return None
@@ -2173,6 +2169,32 @@ def kegg(gene):
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
+def compile_re():
+    """Precompilation of regular expressions used to identify notation of
+       gene product modification"""
+
+    global mod, c_orf_, mod_prefix, mod_suffix, infix
+
+    # reactome_modifications()
+    # Phosphorylation
+    mod = "^p-(A|C|D|E|F|G|H|I|K|L|M|N|P|Q|R|S|T|V|W|X|Y)[0-9]+-[A-Z0-9]+$"
+
+    # wikipathways_modifications()
+    # C#orf#
+    c_orf_ = re.compile("^C([1-9]|1[0-9]|2[0-2]|X|Y|MT)orf[0-9]+$")
+
+    # Prefixes: c, c-
+    mod_prefix = re.compile("^(c|c-)[A-Z]+([A-Z]|[0-9])*")
+
+    # Suffixes: m/n, n
+    mod_suffix = re.compile("[A-Z]+([A-Z]|[0-9])*(m/n|n)+$")
+
+    # Expected gene name composition
+    infix = re.compile("[A-Z]+([A-Z]|[0-9])*")
+
+    return None
+
+
 def reactome_modifications(gene_name):
     if re.match(mod, gene_name):
         gene_name = "-".join(gene_name.split("-")[2:])
@@ -2184,32 +2206,18 @@ def reactome(gene):
     reactome_api_url = "https://www.reactome.org/ContentService"
 
     response = request(
-        "{}/search/query?query={}&species=Homo%%20sapiens&cluster=true".format(
+        "{}/data/mapping/UniProt/{}/pathways?species=9606".format(
             reactome_api_url, gene), "application/json")
 
-    if response is None or "results" not in response:
+    if response is None:
         return []
 
-    pathway_ids = set()
-
-    for result in response["results"]:
-        if result["typeName"] == "Pathway":
-            for entry in result["entries"]:
-                pathway_ids.add(entry["stId"])
-
     pathways = {}
-    for pathway_id in pathway_ids:
+    for entry in response:
+        pathway_id = entry["stId"]
         pathways[pathway_id] = {}
-        response = request("{}/data/query/{}".format(
-            reactome_api_url, pathway_id), "application/json")
-
-        if response is None:
-            del pathways[pathway_id]
-            continue
-
-        pathways[pathway_id] = {}
-        pathways[pathway_id]["name"] = response["displayName"]
-        pathways[pathway_id]["version"] = response["stIdVersion"].split(".")[1]
+        pathways[pathway_id]["name"] = entry["displayName"]
+        pathways[pathway_id]["version"] = entry["stIdVersion"].split(".")[1]
 
     reaction_ids = set()
     reactions_to_pathways = {}
@@ -2281,21 +2289,10 @@ def reactome(gene):
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
-def compile_re():
-    global mod, c_orf_, mod_prefix, mod_suffix, infix
-
-    # reactome_modifications()
-    mod = "^p-(A|C|D|E|F|G|H|I|K|L|M|N|P|Q|R|S|T|V|W|X|Y)[0-9]+-[A-Z0-9]+$"
-
-    # wikipathways_modifications()
-    c_orf_ = re.compile("^C([1-9]|1[0-9]|2[0-2]|X|Y|MT)orf[0-9]+$")
-    mod_prefix = re.compile("^(c|c-)[A-Z]+([A-Z]|[0-9])*")
-    mod_suffix = re.compile("[A-Z]+([A-Z]|[0-9])*(m/n|n)+$")
-    infix = re.compile("[A-Z]+([A-Z]|[0-9])*")
-
-    return None
-
 def wikipathways_modifications(gene_name):
+    if " " in gene_name:
+        return None
+
     if mod_prefix.match(gene_name):
         gene_name = infix.search(gene_name).group(0)
 
@@ -2427,12 +2424,16 @@ def wikipathways(gene, exclude_reactome=True, exclude_homology_mappings=True):
                     group_ref = data_node.get("GroupRef")
 
                     if graph_id or group_ref:
-                        text_label = wikipathways_modifications(
-                                data_node.attrib["TextLabel"])
+                        text_label = data_node.attrib["TextLabel"]
 
-                        if (not isinstance(text_label, str) or
-                            text_label == gene):
+                        if not isinstance(text_label, str):
                             continue
+
+                        if (graph_id in (input_ids["non-group"] |
+                            output_ids["non-group"]) or
+                            group_ref in (input_ids["group"] |
+                            output_ids["group"])):
+                            text_label = wikipathways_modifications(text_label)
 
                         if (graph_id in input_ids["non-group"] or
                             group_ref in input_ids["group"]):
@@ -2441,6 +2442,9 @@ def wikipathways(gene, exclude_reactome=True, exclude_homology_mappings=True):
                         if (graph_id in output_ids["non-group"] or
                             group_ref in output_ids["group"]):
                             pathway["output"].add(unicode(text_label, "utf-8"))
+
+                        pathway["input"] -= {gene, None}
+                        pathway["output"] -= {gene, None}
 
     pathways = set((unicode(gene, "utf-8"),
                     unicode("WikiPathways", "utf-8"),
@@ -2534,7 +2538,6 @@ def build_expression_table(
 
     """Build protein expression table for pathway.db"""
 
-
     if num_genes:
         gene_exp = {}
         with open(pathway_db_exp_gene_fp, "r") as gene_exp_file:
@@ -2555,9 +2558,10 @@ def build_expression_table(
         num_genes_expr = len(gene_exp)
         coverage = " ({:.2f}%)".format((num_genes_expr/num_genes)*100)
 
-        print()
-        gene_num = progressbar.ProgressBar(max_value=num_genes_expr)
-        gene_num.update(0)
+        if num_genes_expr:
+            print()
+            gene_num = progressbar.ProgressBar(max_value=num_genes_expr)
+            gene_num.update(0)
 
         peptides = {}
         accessions = {}
