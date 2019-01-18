@@ -2169,37 +2169,50 @@ def kegg(gene):
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
-def compile_re():
+class GeneName():
     """Precompilation of regular expressions used to identify notation of
        gene product modification"""
 
-    global mod, c_orf_, mod_prefix, mod_suffix, infix
-
-    # reactome_modifications()
-    # Phosphorylation
-    mod = "^p-(A|C|D|E|F|G|H|I|K|L|M|N|P|Q|R|S|T|V|W|X|Y)[0-9]+-[A-Z0-9]+$"
-
-    # wikipathways_modifications()
-    # C#orf#
-    c_orf_ = re.compile("^C([1-9]|1[0-9]|2[0-2]|X|Y|MT)orf[0-9]+$")
-
-    # Prefixes: c, c-
-    mod_prefix = re.compile("^(c|c-)[A-Z]+([A-Z]|[0-9])*")
-
-    # Suffixes: m/n, n
-    mod_suffix = re.compile("[A-Z]+([A-Z]|[0-9])*(m/n|n)+$")
-
-    # Expected gene name composition
-    infix = re.compile("[A-Z]+([A-Z]|[0-9])*")
-
-    return None
+    def __init__(self):
+        # Phosphorylation
+        self.mod = re.compile(
+                "^p-(A|C|D|E|F|G|H|I|K|L|M|N|P|Q|R|S|T|V|W|X|Y)[0-9]+-")
+        # Protein
+        self.protein = re.compile("^[A-Z][a-z]*in$")
+        # HGNC-Gene incl. C#orf#
+        self.gene = re.compile(
+        "(^[A-Z]+([A-Z]|[0-9])*$|^C([1-9]|1[0-9]|2[0-2]|X|Y|MT)orf[0-9]+$)")
+        # Prefixes: c, c-
+        self.prefix = re.compile("^(c|c-)")
+        # Suffixes: m/n, n
+        self.suffix = re.compile("(m/n|n)$")
 
 
-def reactome_modifications(gene_name):
-    if re.match(mod, gene_name):
-        gene_name = "-".join(gene_name.split("-")[2:])
+    def reactome(self, gene_name):
+        if self.mod.search(gene_name):
+            gene_name = re.sub(self.mod, "", gene_name)
 
-    return gene_name
+        return gene_name
+
+    def wikipathways(self, gene_name):
+        gene_name = gene_name.strip()
+
+        if " " in gene_name or self.protein.match(gene_name):
+            return None
+
+        if not self.gene.match(gene_name):
+            if self.prefix.search(gene_name):
+                gene_name = re.sub(self.prefix, "", gene_name)
+
+            if self.suffix.search(gene_name):
+                gene_name = re.sub(self.suffix, "", gene_name)
+
+            if not self.gene.match(gene_name):
+                gene_name = gene_name.upper()
+
+        return gene_name
+
+
 
 def reactome(gene):
     """Query Reactome for HGNC-Gene-ID"""
@@ -2252,7 +2265,7 @@ def reactome(gene):
                     name = metabolite["displayName"]
                     name = name.split(" [")[0].split("(")[0]
                     reactions[reaction_id]["input"].add(
-                            reactome_modifications(name))
+                            gene_name.reactome(name))
 
         if "output" in response:
             for metabolite in response["output"]:
@@ -2261,7 +2274,7 @@ def reactome(gene):
                     name = metabolite["displayName"]
                     name = name.split(" [")[0].split("(")[0]
                     reactions[reaction_id]["output"].add(
-                            reactome_modifications(name))
+                            gene_name.reactome(name))
 
     for pathway_id in pathways:
         pathways[pathway_id]["input"] = set()
@@ -2288,21 +2301,6 @@ def reactome(gene):
                    for pathway_id in pathways)
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
-
-def wikipathways_modifications(gene_name):
-    if " " in gene_name:
-        return None
-
-    if mod_prefix.match(gene_name):
-        gene_name = infix.search(gene_name).group(0)
-
-    if mod_suffix.match(gene_name):
-        gene_name = infix.search(gene_name).group(0)
-
-    if not c_orf_.match(gene_name):
-        gene_name = gene_name.upper()
-
-    return gene_name
 
 def wikipathways(gene, exclude_reactome=True, exclude_homology_mappings=True):
     """Query WikiPathways for HGNC-Gene-ID"""
@@ -2433,7 +2431,7 @@ def wikipathways(gene, exclude_reactome=True, exclude_homology_mappings=True):
                             output_ids["non-group"]) or
                             group_ref in (input_ids["group"] |
                             output_ids["group"])):
-                            text_label = wikipathways_modifications(text_label)
+                            text_label = gene_name.wikipathways(text_label)
 
                         if (graph_id in input_ids["non-group"] or
                             group_ref in input_ids["group"]):
@@ -2849,7 +2847,9 @@ def build_pathway_db(
 
     logging.info("Number of input genes: %s", num_input_genes)
 
-    compile_re()
+    global gene_name
+    gene_name = GeneName()
+
     all_up_down_stream_genes = set()
     num_pathways_available = 0
 
