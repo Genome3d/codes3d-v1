@@ -890,8 +890,8 @@ def calc_hic_contacts(args):
 
 def produce_summary(
         p_values, snps, genes, gene_database_fp,
-        expression_table_fp, fdr_threshold, output_dir, buffer_size_in,
-        buffer_size_out, num_processes):
+        expression_table_fp, fdr_threshold, output_dir, buffer_size,
+        num_processes):
     """Write final results of eQTL-eGene associations
 
     Args:
@@ -931,7 +931,7 @@ def produce_summary(
     # Number of eQTLs deemed significant under the given threshold
     if not os.path.isdir(output_dir):
         os.mkdir(output_dir)
-    summary = open(output_dir + "/summary.txt", 'w', buffering=buffer_size_out)
+    summary = open(output_dir + "/summary.txt", 'w', buffering=buffer_size)
     summ_writer = csv.writer(summary, delimiter='\t')
     summ_header = ['SNP',
                    'SNP_Chromosome',
@@ -957,7 +957,7 @@ def produce_summary(
                    'Min_Expression_Level']
     summ_writer.writerow(summ_header)
     sig_file = open(os.path.join(output_dir, 'significant_eqtls.txt'), 'w',
-                    buffering=buffer_size_out)
+                    buffering=buffer_size)
     sigwriter = csv.writer(sig_file, delimiter='\t')
     sigwriter.writerow(summ_header)
     gene_index_db = sqlite3.connect(gene_database_fp)
@@ -971,7 +971,7 @@ def produce_summary(
     else:
         query_str = "SELECT chr, start, end FROM genes WHERE symbol=?"
     eqtlfile = open(os.path.join(output_dir, 'eqtls.txt'), 'r',
-                    buffering=buffer_size_in)
+                    buffering=buffer_size)
     ereader = csv.reader(eqtlfile, delimiter = '\t')
 
     p_values_map = {}
@@ -1937,18 +1937,20 @@ def request(url, content_type):
         try:
             response = requests.get(url)
             break
-        except requests.exceptions.HTTPError:
-            logging.error("Unsucessful status code %s: %s",
-                response.status_code, url)
-            return None
         except requests.exceptions.ConnectionError:
             logging.error("Connection failure: %s", url)
             time.sleep(60)
             continue
         except requests.exceptions.RequestException:
-            logging.error("General Error: %s", url)
+            logging.error("Error: %s", url)
             return None
 
+    try:
+        response.raise_for_status()
+    except requests.exceptions.HTTPError:
+        logging.error("Unsucessful status code: %s: %s", response.status_code,
+                      url)
+        return None
 
     if content_type == "application/json":
         try:
@@ -2057,11 +2059,11 @@ def kegg(gene):
                            "text/plain")
 
         if response is None:
+            pathway_name = "NA"
             continue
 
         pathway_entries = response.split("\n")
 
-        pathway_name = "NA"
         for entry in pathway_entries:
             if entry.startswith("NAME"):
                 pathway_name = entry.replace("NAME", "").replace(
@@ -2145,7 +2147,7 @@ def kegg(gene):
                 upstream_genes, downstream_genes = set(), set()
 
             months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul",
-                    "Aug", "Sep", "Oct", "Nov", "Dec"]
+                      "Aug", "Sep", "Oct", "Nov", "Dec"]
 
             if (header_comment and
                 header_comment.startswith(" Creation date: ") and
@@ -2174,18 +2176,21 @@ class GeneName():
        gene product modification"""
 
     def __init__(self):
+        # Reactome
         # Phosphorylation
         self.mod = re.compile(
                 "^p-(A|C|D|E|F|G|H|I|K|L|M|N|P|Q|R|S|T|V|W|X|Y)[0-9]+-")
+
+        # WikiPathways
         # Protein
         self.protein = re.compile("^[A-Z][a-z]*in$")
         # HGNC-Gene incl. C#orf#
         self.gene = re.compile(
-        "(^[A-Z]+([A-Z]|[0-9])*$|^C([1-9]|1[0-9]|2[0-2]|X|Y|MT)orf[0-9]+$)")
-        # Prefixes: c, c-
+         "(^[A-Z]+([A-Z]|[0-9]|-)*$|^C([1-9]|1[0-9]|2[0-2]|X|Y|MT)orf[0-9]+$)")
+        # Prefixes: c; c-
         self.prefix = re.compile("^(c|c-)")
-        # Suffixes: m/n, n
-        self.suffix = re.compile("(m/n|n)$")
+        # Suffixes: a,-c; m/n; n
+        self.suffix = re.compile("(a,-c|m/n|n)$")
 
 
     def reactome(self, gene_name):
@@ -2197,7 +2202,7 @@ class GeneName():
     def wikipathways(self, gene_name):
         gene_name = gene_name.strip()
 
-        if " " in gene_name or self.protein.match(gene_name):
+        if re.search(r"\s", gene_name) or self.protein.match(gene_name):
             return None
 
         if not self.gene.match(gene_name):
@@ -2211,8 +2216,6 @@ class GeneName():
                 gene_name = gene_name.upper()
 
         return gene_name
-
-
 
 def reactome(gene):
     """Query Reactome for HGNC-Gene-ID"""
@@ -2232,20 +2235,31 @@ def reactome(gene):
         pathways[pathway_id]["name"] = entry["displayName"]
         pathways[pathway_id]["version"] = entry["stIdVersion"].split(".")[1]
 
-    reaction_ids = set()
+
+    response = request(
+            "{}/data/mapping/UniProt/{}/reactions?species=9606".format(
+                reactome_api_url, gene), "application/json")
+
+    gene_reaction_ids = set()
+    if response is not None:
+        for entry in response:
+            gene_reaction_ids.add(entry["stId"])
+
     reactions_to_pathways = {}
     for pathway_id in pathways:
         response = request("{}/data/pathway/{}/containedEvents/stId".format(
             reactome_api_url, pathway_id), "text/plain")
 
         if response is None:
+            reactions_to_pathways[pathway_id] = set()
             continue
 
-        response_values = set(response[1:-1].split(", "))
+        response_values = set(response.strip("[]").split(", "))
+        pathway_reaction_ids = response_values & gene_reaction_ids
+        reactions_to_pathways[pathway_id] = pathway_reaction_ids
 
-        reactions_to_pathways[pathway_id] = response_values
-        reaction_ids |= response_values
-
+    reaction_ids = set(itertools.chain.from_iterable(
+                                reactions_to_pathways.values()))
     reactions = {}
     for reaction_id in reaction_ids:
         reactions[reaction_id] = {}
@@ -2305,15 +2319,13 @@ def reactome(gene):
 def wikipathways(gene, exclude_reactome=True, exclude_homology_mappings=True):
     """Query WikiPathways for HGNC-Gene-ID"""
     wikipathways_api_url = "https://webservice.wikipathways.org"
-    nsmap = {
-            "ns1": "http://www.wso2.org/php/xsd",
-            "ns2": "http://www.wikipathways.org/webservice",
-            "gpml": "http://pathvisio.org/GPML/2013a"}
+    nsmap = {"ns1": "http://www.wso2.org/php/xsd",
+             "ns2": "http://www.wikipathways.org/webservice",
+             "gpml": "http://pathvisio.org/GPML/2013a"}
 
-    discard_tags = {
-            "Curation:Tutorial",
-            "Curation:UnderConstruction",
-            "Curation:Hypothetical"}
+    discard_tags = {"Curation:Tutorial",
+                    "Curation:UnderConstruction",
+                    "Curation:Hypothetical"}
 
     if exclude_reactome:
         discard_tags.add("Curation:Reactome_Approved")
@@ -2358,13 +2370,13 @@ def wikipathways(gene, exclude_reactome=True, exclude_homology_mappings=True):
         if response is None:
             continue
 
-        homology = False
+        homology_mapped_pathway = False
         if exclude_homology_mappings:
             for comment in response.findall("gpml:Comment", nsmap):
                 if comment.get("Source") == "HomologyMapper":
                     homology = True
                     break
-        if homology:
+        if homology_mapped_pathway:
             pathways.remove(pathway)
             continue
 
@@ -2377,23 +2389,29 @@ def wikipathways(gene, exclude_reactome=True, exclude_homology_mappings=True):
                 graph_to_group[graph_id] = group_id
 
         graph_ids = set()
+        name = {}
+
         for data_node in response.findall("gpml:DataNode", nsmap):
+            text_label = data_node.attrib["TextLabel"]
 
-            if data_node.attrib["TextLabel"] == gene:
-                graph_id = data_node.get("GraphId")
-                if graph_id:
-                    graph_ids.add(graph_id)
+            if isinstance(text_label, str):
+                name[text_label] = gene_name.wikipathways(text_label)
 
-                group_ref = data_node.get("GroupRef")
-                if group_ref in group_to_graph:
-                    graph_ids.add(group_to_graph[group_ref])
+                if name[text_label] == gene:
+                    graph_id = data_node.get("GraphId")
+                    if graph_id:
+                        graph_ids.add(graph_id)
+
+                    group_ref = data_node.get("GroupRef")
+                    if group_ref in group_to_graph:
+                        graph_ids.add(group_to_graph[group_ref])
 
         input_ids = {"non-group": set(), "group": set()}
         output_ids = {"non-group": set(), "group": set()}
 
         for interaction in response.findall("gpml:Interaction", nsmap):
-            points = interaction.find("gpml:Graphics", nsmap).findall(
-                        "gpml:Point", nsmap)
+            points = interaction.find(
+                    "gpml:Graphics", nsmap).findall("gpml:Point", nsmap)
 
             input_ref = points[0].get("GraphRef")
             output_ref = points[1].get("GraphRef")
@@ -2423,26 +2441,20 @@ def wikipathways(gene, exclude_reactome=True, exclude_homology_mappings=True):
 
                     if graph_id or group_ref:
                         text_label = data_node.attrib["TextLabel"]
+                        corrected_name = name.get(text_label)
 
-                        if not isinstance(text_label, str):
+                        if not corrected_name or corrected_name == gene:
                             continue
-
-                        if (graph_id in (input_ids["non-group"] |
-                            output_ids["non-group"]) or
-                            group_ref in (input_ids["group"] |
-                            output_ids["group"])):
-                            text_label = gene_name.wikipathways(text_label)
 
                         if (graph_id in input_ids["non-group"] or
                             group_ref in input_ids["group"]):
-                            pathway["input"].add(unicode(text_label, "utf-8"))
+                            pathway["input"].add(
+                                    unicode(corrected_name, "utf-8"))
 
                         if (graph_id in output_ids["non-group"] or
                             group_ref in output_ids["group"]):
-                            pathway["output"].add(unicode(text_label, "utf-8"))
-
-                        pathway["input"] -= {gene, None}
-                        pathway["output"] -= {gene, None}
+                            pathway["output"].add(
+                                    unicode(corrected_name, "utf-8"))
 
     pathways = set((unicode(gene, "utf-8"),
                     unicode("WikiPathways", "utf-8"),
@@ -2497,6 +2509,7 @@ def log_wikipathways_release():
             if tr.find("td").find("a").text == "current":
                 break
             release = tr.find("td").find("a").text
+
         release = "-".join([release[0:4], release[4:6], release[6:8]])
         logging.info("WikiPathways version: %s", release)
 
@@ -2557,7 +2570,7 @@ def build_expression_table(
         coverage = " ({:.2f}%)".format((num_genes_expr/num_genes)*100)
 
         if num_genes_expr:
-            print()
+            print("Collecting expression information...")
             gene_num = progressbar.ProgressBar(max_value=num_genes_expr)
             gene_num.update(0)
 
@@ -2757,6 +2770,7 @@ def build_pathway_db(
 
     num_input_genes = len(input_genes)
     if num_input_genes:
+        print("Collecting pathway information...")
         input_gene_num = progressbar.ProgressBar(max_value=num_input_genes)
         input_gene_num.update(0)
 
@@ -2853,15 +2867,20 @@ def build_pathway_db(
     all_up_down_stream_genes = set()
     num_pathways_available = 0
 
-    pool = multiprocessing.Pool(processes=3)
+    #pool = multiprocessing.Pool(processes=3)
     for i, gene in enumerate(input_genes, 1):
-        args = [(database, gene)
-                for database in (kegg, reactome, wikipathways)]
-        results = pool.map(query_database, args)
-        if results[0] or results[1] or results[2]:
-            num_pathways_available += 1
-        for result in results:
-            for pathway in result:
+
+        #args = [(database, gene)
+        #        for database in (kegg, reactome, wikipathways)]
+        #results = pool.map(query_database, args)
+        #if results[0] or results[1] or results[2]:
+        #    num_pathways_available += 1
+        #for result in results:
+        #    for pathway in result:
+
+        for database in (kegg, reactome, wikipathways):
+            for pathway in database(gene):
+
                 pathway_db_cursor.execute("""
                     INSERT INTO
                         Pathways
@@ -2926,7 +2945,7 @@ def build_pathway_db(
         pathway_db.commit()
         input_gene_num.update(i)
 
-    pool.close()
+    #pool.close()
     tsv_file.close()
 
 
@@ -3271,17 +3290,14 @@ if __name__ == "__main__":
     parser.add_argument("-r", "--restriction_enzymes", nargs='+',
                         help="Space-separated list of  " +\
                         "restriction enzymes used in HiC data.")
-    parser.add_argument("-b","--buffer_size_in",type=int,default=1048576,
-                        help="Buffer size applied to file input during " +\
-                        "compilation (default: 1048576).")
-    parser.add_argument("-d","--buffer_size_out",type=int,default=1048576,
-                        help="Buffer size applied to file output during " +\
+    parser.add_argument("-b","--buffer_size",type=int,default=1048576,
+                        help="Buffer size applied to file I/O during " +\
                         "compilation (default: 1048576).")
     parser.add_argument("-k", "--num_processes_summary", type=int,
-                        default=min(psutil.cpu_count(), 32),
+                        default=(psutil.cpu_count() // 2),
                         help="The number of processes for compilation of " +\
                         "the results (default: %s)." %
-                        str(min(psutil.cpu_count(), 32)))
+                        str((psutil.cpu_count() // 2)))
     args = parser.parse_args()
     config = configparser.ConfigParser()
     config.read(args.config)
@@ -3335,8 +3351,8 @@ if __name__ == "__main__":
         suppress_intermediate_files=args.suppress_intermediate_files)
     genes = produce_summary(
         p_values, snps, genes, gene_database_fp, expression_table_fp,
-        args.fdr_threshold, args.output_dir, args.buffer_size_in,
-        args.buffer_size_out, args.num_processes_summary)
+        args.fdr_threshold, args.output_dir, args.buffer_size,
+        args.num_processes_summary)
     produce_pathway_summary(genes, pathway_db_fp, args.output_dir,
-        args.buffer_size_out, args.significant_expression)
+        args.buffer_size, args.significant_expression)
 
