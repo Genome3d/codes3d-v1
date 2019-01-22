@@ -23,12 +23,8 @@ if __name__ == "__main__":
             help="The configuration file to be used in this "+\
             "instance (default: conf.py)")
     parser.add_argument(
-            "-b","--buffer_size_in",type=int,default=1048576,
+            "-b","--buffer_size",type=int,default=1048576,
             help="Buffer size applied to file input during compilation "+\
-            " (default: 1048576).")
-    parser.add_argument(
-            "-d","--buffer_size_out",type=int,default=1048576,
-            help="Buffer size applied to file output during compilation "+\
             " (default: 1048576).")
     parser.add_argument("-e", "--significant_expression", type=float,
             default=0.05,
@@ -44,8 +40,8 @@ if __name__ == "__main__":
 	    os.mkdir(args.output_dir)
 
     genes = codes3d.parse_summary_file(args.summary_file,
-        args.buffer_size_in)
+        args.buffer_size)
 
     codes3d.produce_pathway_summary(genes, pathway_db_fp, args.output_dir,
-        args.buffer_size_out, args.significant_expression)
+        args.buffer_size, args.significant_expression)
 
