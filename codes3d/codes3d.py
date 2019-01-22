@@ -14,7 +14,6 @@ import math
 import operator
 import os
 import sys
-import OpenSSL
 import pandas
 import progressbar
 import psutil
@@ -2027,7 +2026,6 @@ def kegg(gene):
     kegg_api_url = "http://rest.kegg.jp"
     response = request("{}/find/genes/{}".format(kegg_api_url, gene),
                        "text/plain")
-
     if response is None:
         return []
 
@@ -2051,15 +2049,16 @@ def kegg(gene):
         return []
 
     pathway_entries = response.split("\n")
+    pathway_ids = [entry.split("\t")[1].split(":")[1]
+                   for entry in pathway_entries if entry]
 
-    pathway_ids = [entry.split("\t")[1] for entry in pathway_entries if entry]
+    name = {}
     for pathway_id in pathway_ids:
-        pathway_id = pathway_id.split(":")[1]
         response = request("{}/get/{}".format(kegg_api_url, pathway_id),
                            "text/plain")
 
         if response is None:
-            pathway_name = "NA"
+            name[pathway_id] = "NA"
             continue
 
         pathway_entries = response.split("\n")
@@ -2067,16 +2066,21 @@ def kegg(gene):
         for entry in pathway_entries:
             if entry.startswith("NAME"):
                 pathway_name = entry.replace("NAME", "").replace(
-                    "- Homo sapiens (human)", "")
-                pathway_name = pathway_name.strip()
+                    "- Homo sapiens (human)", "").strip()
+                name[pathway_id] = pathway_name
                 break
 
+    version = {}
+    up_down_stream = {}
+    for pathway_id in pathway_ids:
         response = request("{}/get/{}/kgml".format(kegg_api_url, pathway_id),
                            "text/xml")
 
         if response is None:
-            pathway_version = unicode("NA")
-            upstream_genes, downstream_genes = set(), set()
+            version[pathway_id] = "NA"
+            up_down_stream[pathway_id] = {}
+            up_down_stream[pathway_id]["upstream"] = set()
+            up_down_stream[pathway_id]["downstream"] = set()
 
         else:
             header_comment, response = response
@@ -2146,6 +2150,10 @@ def kegg(gene):
             else:
                 upstream_genes, downstream_genes = set(), set()
 
+            up_down_stream[pathway_id] = {}
+            up_down_stream[pathway_id]["upstream"] = upstream_genes
+            up_down_stream[pathway_id]["downstream"] = downstream_genes
+
             months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul",
                       "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -2158,16 +2166,18 @@ def kegg(gene):
                 day = header_comment[4].replace(",", "")
                 year = header_comment[5]
                 pathway_version = "-".join([year, month, day])
+                version[pathway_id] = pathway_version
             else:
-                pathway_version = "NA"
+                version[pathway_id] = "NA"
 
-        pathways.add((unicode(gene, "utf-8"),
-                      unicode("KEGG", "utf-8"),
-                      pathway_id,
-                      unicode(pathway_version),
-                      pathway_name,
-                      tuple(sorted(list(upstream_genes))),
-                      tuple(sorted(list(downstream_genes)))))
+    pathways = ((unicode(gene, "utf-8"),
+                 unicode("KEGG", "utf-8"),
+                 unicode(pathway_id),
+                 unicode(version[pathway_id]),
+                 unicode(name[pathway_id]),
+                 tuple(sorted(list(up_down_stream[pathway_id]["upstream"]))),
+                 tuple(sorted(list(up_down_stream[pathway_id]["downstream"]))))
+                for pathway_id in pathway_ids)
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
