@@ -2188,15 +2188,17 @@ class GeneName():
     def __init__(self):
         # Reactome
         # Phosphorylation
-        self.mod = re.compile(
-                "^p-(A|C|D|E|F|G|H|I|K|L|M|N|P|Q|R|S|T|V|W|X|Y)[0-9]+-")
+        self.mod = re.compile("^p-(A|C|D|E|F|G|H|I|K|L|M|N|P|Q|R|S|T|V|W|X|Y)[0-9]+-")
 
         # WikiPathways
+        # Integer
+        self.integer = re.compile("^[0-9]+$")
         # Protein
-        self.protein = re.compile("^[A-Z][a-z]*in$")
+        self.protein = re.compile("([A-Z]|[a-z]|[0-9]|-)*in")
+        # Enzyme
+        self.enzyme = re.compile("([A-Z]|[a-z]|[0-9]|-)*ase")
         # HGNC-Gene incl. C#orf#
-        self.gene = re.compile(
-         "(^[A-Z]+([A-Z]|[0-9]|-)*$|^C([1-9]|1[0-9]|2[0-2]|X|Y|MT)orf[0-9]+$)")
+        self.gene = re.compile("(^([A-Z]|[0-9])([A-Z]|[a-z]|[0-9]|-)*(.[0-9]+)?$|^C([1-9]|1[0-9]|2[0-2]|X|Y|MT)orf[0-9]+$)")
         # Prefixes: c; c-
         self.prefix = re.compile("^(c|c-)")
         # Suffixes: a,-c; m/n; n
@@ -2210,9 +2212,12 @@ class GeneName():
         return gene_name
 
     def wikipathways(self, gene_name):
-        gene_name = gene_name.strip()
+        gene_name = gene_name.strip(" ()?*")
+        gene_name = gene_name.split("(")[0].strip()
 
-        if re.search(r"\s", gene_name) or self.protein.match(gene_name):
+        if (self.integer.match(gene_name) or
+            self.protein.match(gene_name) or
+            self.enzyme.match(gene_name)):
             return None
 
         if not self.gene.match(gene_name):
@@ -2222,7 +2227,8 @@ class GeneName():
             if self.suffix.search(gene_name):
                 gene_name = re.sub(self.suffix, "", gene_name)
 
-            if not self.gene.match(gene_name):
+        if not self.gene.match(gene_name):
+            if self.gene.match(gene_name.upper()):
                 gene_name = gene_name.upper()
 
         return gene_name
@@ -2354,8 +2360,8 @@ def wikipathways(gene, exclude_reactome=True, exclude_homology_mappings=True):
         pathway["revision"] = result.find("ns2:revision", nsmap).text
         pathway["name"] = result.find("ns2:name", nsmap).text
 
-        pathway["input"] = set()
-        pathway["output"] = set()
+        pathway["input"] = {}
+        pathway["output"] = {}
 
         pathways.append(pathway)
 
@@ -2399,15 +2405,15 @@ def wikipathways(gene, exclude_reactome=True, exclude_homology_mappings=True):
                 graph_to_group[graph_id] = group_id
 
         graph_ids = set()
-        name = {}
+        corrected_name = {}
 
         for data_node in response.findall("gpml:DataNode", nsmap):
             text_label = data_node.attrib["TextLabel"]
 
             if isinstance(text_label, str):
-                name[text_label] = gene_name.wikipathways(text_label)
+                corrected_name[text_label] = gene_name.wikipathways(text_label)
 
-                if name[text_label] == gene:
+                if corrected_name[text_label] == gene:
                     graph_id = data_node.get("GraphId")
                     if graph_id:
                         graph_ids.add(graph_id)
@@ -2416,33 +2422,38 @@ def wikipathways(gene, exclude_reactome=True, exclude_homology_mappings=True):
                     if group_ref in group_to_graph:
                         graph_ids.add(group_to_graph[group_ref])
 
-        input_ids = {"non-group": set(), "group": set()}
-        output_ids = {"non-group": set(), "group": set()}
+        input_ids = {"non-group": {}, "group": {}}
+        output_ids = {"non-group": {}, "group": {}}
 
         for interaction in response.findall("gpml:Interaction", nsmap):
             points = interaction.find(
                     "gpml:Graphics", nsmap).findall("gpml:Point", nsmap)
 
             input_ref = points[0].get("GraphRef")
-            output_ref = points[1].get("GraphRef")
+            output_ref = points[-1].get("GraphRef")
+
+            regulation_type = points[-1].get("ArrowHead")
 
             if input_ref in graph_ids:
                 if output_ref in graph_to_group:
-                    output_ids["group"].add(graph_to_group[output_ref])
+                    output_ref = graph_to_group[output_ref]
+                    output_ids["group"][output_ref] = regulation_type
                 else:
-                    output_ids["non-group"].add(output_ref)
+                    output_ids["non-group"][output_ref] = regulation_type
 
             if output_ref in graph_ids:
                 if input_ref in graph_to_group:
-                    input_ids["group"].add(graph_to_group[input_ref])
+                    input_ref = graph_to_group[input_ref]
+                    input_ids["group"][input_ref] = regulation_type
                 else:
-                    input_ids["non-group"].add(input_ref)
+                    input_ids["non-group"][input_ref] = regulation_type
 
-        if (input_ids["non-group"] or input_ids["group"] or
-            output_ids["non-group"] or output_ids["group"]):
+        if (input_ids["non-group"] or
+            input_ids["group"] or
+            output_ids["non-group"] or
+            output_ids["group"]):
 
             for data_node in response.findall("gpml:DataNode", nsmap):
-
                 if (data_node.get("Type") == "GeneProduct" and
                     data_node.find("gpml:Xref", nsmap).get("Database") and
                     data_node.find("gpml:Xref", nsmap).get("ID")):
@@ -2451,29 +2462,57 @@ def wikipathways(gene, exclude_reactome=True, exclude_homology_mappings=True):
 
                     if graph_id or group_ref:
                         text_label = data_node.attrib["TextLabel"]
-                        corrected_name = name.get(text_label)
+                        name = corrected_name[text_label]
 
-                        if not corrected_name or corrected_name == gene:
+                        if not name or name == gene:
                             continue
 
-                        if (graph_id in input_ids["non-group"] or
-                            group_ref in input_ids["group"]):
-                            pathway["input"].add(
-                                    unicode(corrected_name, "utf-8"))
+                        name = unicode(name, "utf-8")
 
-                        if (graph_id in output_ids["non-group"] or
-                            group_ref in output_ids["group"]):
-                            pathway["output"].add(
-                                    unicode(corrected_name, "utf-8"))
+                        if graph_id in input_ids["non-group"]:
+                            if name not in pathway["input"]:
+                                pathway["input"][name] = [False, False]
 
-    pathways = set((unicode(gene, "utf-8"),
+                            if input_ids["non-group"][graph_id] == "Arrow":
+                                pathway["input"][name][0] = True
+                            elif input_ids["non-group"][graph_id] == "TBar":
+                                pathway["input"][name][1] = True
+
+                        if group_ref in input_ids["group"]:
+                            if name not in pathway["input"]:
+                                pathway["input"][name] = [False, False]
+
+                            if input_ids["group"][group_ref] == "Arrow":
+                                pathway["input"][name][0] = True
+                            elif input_ids["group"][group_ref] == "TBar":
+                                pathway["input"][name][1] = True
+
+                        if graph_id in output_ids["non-group"]:
+                            if name not in pathway["output"]:
+                                pathway["output"][name] = [False, False]
+
+                            if output_ids["non-group"][graph_id] == "Arrow":
+                                pathway["output"][name][0] = True
+                            elif output_ids["non-group"][graph_id] == "TBar":
+                                pathway["output"][name][1] = True
+
+                        if group_ref in output_ids["group"]:
+                            if name not in pathway["output"]:
+                                pathway["output"][name] = [False, False]
+
+                            if output_ids["group"][group_ref] == "Arrow":
+                                pathway["output"][name][0] = True
+                            elif output_ids["group"][group_ref] == "TBar":
+                                pathway["output"][name][1] = True
+
+    pathways = [[unicode(gene, "utf-8"),
                     unicode("WikiPathways", "utf-8"),
                     unicode(pathway["id"], "utf-8"),
                     unicode(pathway["revision"], "utf-8"),
                     unicode(pathway["name"], "utf-8"),
-                    tuple(sorted(list(pathway["input"]))),
-                    tuple(sorted(list(pathway["output"]))))
-                   for pathway in pathways)
+                    pathway["input"],
+                    pathway["output"]]
+                   for pathway in pathways]
 
     return sorted(list(pathways), key=lambda pathway: pathway[2])
 
@@ -2756,7 +2795,7 @@ def build_pathway_db(
         pathway_db_exp_prot_fp,
         hgnc_gene_sym_fp):
 
-    """Build pathway.db"""
+    """"""
 
     logging.getLogger("requests").setLevel(logging.CRITICAL)
     logging.basicConfig(
@@ -2793,7 +2832,11 @@ def build_pathway_db(
                   "Pathway_Name",
                   "Up_Down_Stream_Gene",
                   "Upstream",
-                  "Downstream"]
+                  "Downstream",
+                  "Upregulating",
+                  "Downregulating",
+                  "Upregulated",
+                  "Downregulated"]
     tsv_writer.writerow(tsv_header)
 
     pathway_db_cursor.execute("""
@@ -2843,6 +2886,8 @@ def build_pathway_db(
                 pathway TEXT,
                 gene TEXT,
                 upstream_gene TEXT,
+                upregulating INTEGER,
+                downregulating INTEGER,
                 PRIMARY KEY (
                     database,
                     pathway,
@@ -2857,6 +2902,8 @@ def build_pathway_db(
                 pathway TEXT,
                 gene TEXT,
                 downstream_gene TEXT,
+                upregulated INTEGER,
+                downregulated INTEGER,
                 PRIMARY KEY (
                     database,
                     pathway,
@@ -2905,50 +2952,91 @@ def build_pathway_db(
                         (?, ?, ?)
                     """, (pathway[1], pathway[2], pathway[4]))
 
-                for upstream_gene in pathway[5]:
+
+                if isinstance(pathway[5], dict):
+                    entries = [
+                        (pathway[1], pathway[2], pathway[0], upstream_gene,
+                         int(pathway[5][upstream_gene][0]),
+                         int(pathway[5][upstream_gene][1]))
+                        for upstream_gene in pathway[5]]
+                else:
+                    entries = [
+                        (pathway[1], pathway[2], pathway[0], upstream_gene,
+                         None, None)
+                        for upstream_gene in pathway[5]]
+
+                for entry in entries:
                     pathway_db_cursor.execute("""
                         INSERT INTO
                             UpstreamGenes
                         VALUES
-                            (?, ?, ?, ?)
-                        """, (pathway[1], pathway[2], pathway[0],
-                            upstream_gene))
+                            (?, ?, ?, ?, ?, ?)
+                        """, entry)
 
-                for downstream_gene in pathway[6]:
+                if isinstance(pathway[6], dict):
+                    entries = [
+                        (pathway[1], pathway[2], pathway[0], upstream_gene,
+                         int(pathway[6][upstream_gene][0]),
+                         int(pathway[6][upstream_gene][1]))
+                        for upstream_gene in pathway[6]]
+                else:
+                    entries = [
+                        (pathway[1], pathway[2], pathway[0], upstream_gene,
+                         None, None)
+                        for upstream_gene in pathway[6]]
+
+                for entry in entries:
                     pathway_db_cursor.execute("""
                         INSERT INTO
                             DownstreamGenes
                         VALUES
-                            (?, ?, ?, ?)
-                        """, (pathway[1], pathway[2], pathway[0],
-                            downstream_gene))
+                            (?, ?, ?, ?, ?, ?)
+                        """, entry)
 
                 tsv_row = [entry.encode("utf-8") for entry in pathway[:5]]
 
-                up_down_stream_genes = set(pathway[5]) | set(pathway[6])
-
-                if not up_down_stream_genes:
-                    tsv_writer.writerow([
-                            tsv_row[0],
-                            tsv_row[1],
-                            tsv_row[2],
-                            tsv_row[3],
-                            tsv_row[4],
-                            "NA",
-                            False,
-                            False])
+                if not (pathway[5] or pathway[6]):
+                    tsv_row.extend(["NA", "NA", "NA", "NA", "NA", "NA"])
+                    tsv_writer.writerow(tsv_row)
 
                 else:
-                    for up_down_stream_gene in sorted(up_down_stream_genes):
-                        tsv_writer.writerow([
-                                tsv_row[0],
+                    up_down_stream_genes = set(pathway[5]) | set(pathway[6])
+                    if isinstance(pathway[5], dict):
+                        tsv_rows = [
+                               [tsv_row[0],
                                 tsv_row[1],
                                 tsv_row[2],
                                 tsv_row[3],
                                 tsv_row[4],
                                 up_down_stream_gene.encode("utf-8"),
                                 up_down_stream_gene in pathway[5],
-                                up_down_stream_gene in pathway[6]])
+                                up_down_stream_gene in pathway[6],
+                                (up_down_stream_gene in pathway[5] and
+                                 pathway[5][up_down_stream_gene][0]),
+                                (up_down_stream_gene in pathway[5] and
+                                 pathway[5][up_down_stream_gene][1]),
+                                (up_down_stream_gene in pathway[6] and
+                                 pathway[6][up_down_stream_gene][0]),
+                                (up_down_stream_gene in pathway[6] and
+                                 pathway[6][up_down_stream_gene][1])]
+                            for up_down_stream_gene in sorted(
+                                up_down_stream_genes)]
+                    else:
+                        tsv_rows = [
+                               [tsv_row[0],
+                                tsv_row[1],
+                                tsv_row[2],
+                                tsv_row[3],
+                                tsv_row[4],
+                                up_down_stream_gene.encode("utf-8"),
+                                up_down_stream_gene in pathway[5],
+                                up_down_stream_gene in pathway[6],
+                                "NA", "NA", "NA", "NA"]
+                            for up_down_stream_gene in sorted(
+                                up_down_stream_genes)]
+
+                    for tsv_row in tsv_rows:
+                        tsv_writer.writerow(tsv_row)
 
                     all_up_down_stream_genes |= up_down_stream_genes
 
