@@ -2623,21 +2623,19 @@ def build_expression_table(
             gene_num = progressbar.ProgressBar(max_value=num_genes_expr)
             gene_num.update(0)
 
-        peptides = {}
-        accessions = {}
+        accessions, peptides = {}, {}
         with open(pathway_db_gene_map_fp, "r") as gene_map_file:
             gene_map_reader = csv.reader(gene_map_file)
             next(gene_map_reader)
             for line in gene_map_reader:
-                for gene in line[3].split(";"):
+                if line[4] == "True":
+                    gene = line[3]
                     if gene not in genes:
                         continue
 
                     if gene not in accessions:
                         accessions[gene] = set()
-                    accessions[gene] |= set([accession.split("|")[1]
-                                            for accession
-                                            in line[2].split(";")])
+                    accessions[gene].add(line[2].split("|")[1])
 
                     if gene not in peptides:
                         peptides[gene] = set()
@@ -2658,9 +2656,9 @@ def build_expression_table(
 
         peptide_exp = {}
         for gene in accessions:
-            peptide_exp[gene] = {tissue: sum([peptides_exp[peptide][tissue]])
-                                for peptide in peptides[gene]
-                                for tissue in peptides_exp[peptide]}
+            peptide_exp[gene] = {tissue: sum([peptides_exp[peptide][tissue]
+                                    for peptide in peptides[gene]])
+                                 for tissue in peptides_exp[peptide]}
 
             # Compensation for incosistent tissue designation
             peptide_exp[gene]["Adrenal"] = peptide_exp[gene]["Adrenal Gland"]
@@ -2682,8 +2680,8 @@ def build_expression_table(
         protein_exp = {}
         for gene in accessions:
             protein_exp[gene] = {tissue: sum(
-                                 [accession_exp[accession][tissue]])
-                                 for accession in accessions[gene]
+                                    [accession_exp[accession][tissue]
+                                        for accession in accessions[gene]])
                                  for tissue in accession_exp[accession]}
 
         tissues = tissues.values()
@@ -2737,7 +2735,8 @@ def build_expression_table(
 
     pool = multiprocessing.Pool(processes=3)
     for i, gene in enumerate([gene for gene in genes if gene in gene_exp], 1):
-        exp = pool.map(normalize_distribution,
+        exp = pool.map(
+                normalize_distribution,
                 [gene_exp[gene], peptide_exp[gene], protein_exp[gene]])
         for tissue in sorted(tissues):
             pathway_db_cursor.execute("""
@@ -3290,10 +3289,8 @@ def produce_pathway_summary(
 
                 for up_down_stream_gene in sorted(up_down_stream_genes):
                     for tissue in tissues:
-
-                        if (not exp[gene]
-                                or exp[gene][tissue]["protein"]["exp"] > 0.0):
-
+                        if (exp[gene] and
+                                exp[gene][tissue]["protein"]["exp"] > 0.0):
                             to_file = [
                                 snp,
                                 gene,
@@ -3302,16 +3299,13 @@ def produce_pathway_summary(
                                 pathway_name[(database, pathway)],
                                 tissue]
 
-                            if exp[gene]:
-                                to_file.extend([
-                                    "{:.4f}".format(
-                                        exp[gene][tissue][level][measure])
-                                        for level in
-                                            ("gene", "peptide", "protein")
-                                        for measure in
-                                            ("exp", "z-score", "p-value")])
-                            else:
-                                to_file.extend(["NA" for col in range(9)])
+                            to_file.extend([
+                                "{:.4f}".format(
+                                    exp[gene][tissue][level][measure])
+                                    for level in
+                                        ("gene", "peptide", "protein")
+                                    for measure in
+                                        ("exp", "z-score", "p-value")])
 
 
                             if up_down_stream_gene != "NA":
@@ -3338,8 +3332,8 @@ def produce_pathway_summary(
                             summary_writer.writerow(to_file)
 
                             if (exp[gene] and
-                                exp[gene][tissue]["protein"][
-                                    "p-value"] <= p_value):
+                                exp[gene][tissue]["protein"]["p-value"] <=\
+                                                                    p_value):
                                 summary_writer_sig.writerow(to_file)
 
                         current_row += 1
