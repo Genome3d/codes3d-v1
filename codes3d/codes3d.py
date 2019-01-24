@@ -1135,9 +1135,6 @@ def produce_summary(
     summary.close()
     sig_file.close()
 
-    for gene_id in gene_ids:
-        print(gene_id)
-
     return {snp: genes[snp].keys() for snp in genes}
 
 
