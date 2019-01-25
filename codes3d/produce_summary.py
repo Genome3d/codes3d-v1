@@ -33,7 +33,7 @@ if __name__ == "__main__":
             " (default: 1048576).")
     parser.add_argument("-k", "--num_processes_summary", type=int,
             default=(psutil.cpu_count() // 2),
-            help="The number of processes for compilation of the results " +\
+            help="The maximum number of processes for summary compilation. " +\
             "(default: %s)." % str((psutil.cpu_count() // 2)))
     args = parser.parse_args()
     config = configparser.ConfigParser()

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#usr/bin/env python
 
 from __future__ import print_function, division
 import itertools
@@ -40,6 +40,7 @@ import rpy2.robjects as R
 import scipy.stats as st
 import base64
 import re
+import numpy
 
 def parse_parameters(restriction_enzymes, include_cell_line, exclude_cell_line):
     """Validate user parameters -r, -n and -x.
@@ -818,7 +819,6 @@ def get_gene_expression_information(eqtls, expression_table_fp, output_dir):
         sep='\t')
 
 def get_expression(args):
-    global gene_exp
     gene, tissue = args
 
     try:
@@ -1975,12 +1975,12 @@ def request(url):
               "getPathwayAs\?fileType=gpml&pwId=WP[0-9]+&revision=0$"
 
         if re.match(reg, url) and content is not None:
-            nsmap = {"ns1": "http://www.wso2.org/php/xsd",
-                     "ns2": "http://www.wikipathways.org/webservice"}
             try:
                 content = lxml.etree.fromstring(response.text)
                 return lxml.etree.fromstring(
-                    base64.b64decode(content.find("ns1:data", nsmap).text))
+                    base64.b64decode(content.find("ns1:data",
+                        content.nsmap).text))
+
             except TypeError, lxml.etree.LxmlSyntaxError:
                 logging.error("Invalid GPML content: %s", url)
                 return None
@@ -2556,6 +2556,20 @@ def log_wikipathways_release():
 
     return None
 
+def get_exp(args):
+    """"""
+    gene, tissue = args
+
+    try:
+       exp = GENE_DF.at[gene, tissue]
+    except KeyError:
+        return None
+
+    if isinstance(exp, numpy.int64):
+        return exp
+    elif isinstance(exp, numpy.ndarray):
+        return exp.max()
+
 def normalize_distribution(exp):
     """"""
     tissues = exp.keys()
@@ -2578,16 +2592,17 @@ def normalize_distribution(exp):
     return exp
 
 
-def build_expression_table(
+def build_expression_tables(
         pathway_db,
         pathway_db_cursor,
-        pathway_db_tsv_exp_fp,
+        pathway_db_tsv_gene_exp_fp,
+        pathway_db_tsv_prot_exp_fp,
+        expression_table_fp,
         pathway_db_gene_map_fp,
-        pathway_db_exp_gene_fp,
-        pathway_db_exp_pept_fp,
         pathway_db_exp_prot_fp,
         genes,
-        num_genes):
+        num_genes,
+        num_processes):
     """"""
     if num_genes:
         input_gene_name = {}
@@ -2596,25 +2611,22 @@ def build_expression_table(
             genes[i] = gene_name.correct(genes[i])
             input_gene_name[genes[i]] = inp
 
-        gene_exp = {}
-        with open(pathway_db_exp_gene_fp, "r") as gene_exp_file:
-            gene_exp_reader = csv.reader(gene_exp_file)
-            header = next(gene_exp_reader)
+        global GENE_DF
+        GENE_DF = pandas.read_table(expression_table_fp,
+                                    index_col="Description", engine='c',
+                                    compression=None, memory_map=True)
 
-            tissues = {i: header[i].replace("Adult ", "")
-                       for i in range(len(header))
-                       if header[i].startswith("Adult ")}
+        current_process = psutil.Process()
+        num_processes = min(num_processes, len(current_process.cpu_affinity()))
+        pool = multiprocessing.Pool(processes=num_processes)
 
-            for line in gene_exp_reader:
-                gene = line[0]
-                if gene not in genes:
-                    continue
+        tissues = list(GENE_DF)
 
-                gene_exp[gene] = {}
-                for i in tissues:
-                    gene_exp[gene][tissues[i]] = float(line[i])
+        exp_values = pool.map(get_exp,
+                [(gene, tissue) for gene in genes for tissue in tissues])
 
-        accessions, peptides = {}, {}
+
+        accessions = {}
         with open(pathway_db_gene_map_fp, "r") as gene_map_file:
             gene_map_reader = csv.reader(gene_map_file)
             next(gene_map_reader)
@@ -2628,35 +2640,6 @@ def build_expression_table(
                     if gene not in accessions:
                         accessions[gene] = set()
                     accessions[gene].add(line[2].split("|")[1])
-
-                    if gene not in peptides:
-                        peptides[gene] = set()
-                    peptides[gene].add(line[0])
-
-        peptides_exp = {}
-        with open(pathway_db_exp_pept_fp, "r") as peptide_exp_file:
-            peptide_exp_reader = csv.reader(peptide_exp_file)
-            header = next(peptide_exp_reader)
-
-            tissues = {i: header[i].replace("Adult ", "")
-                       for i in range(len(header))
-                       if header[i].startswith("Adult ")}
-
-            for line in peptide_exp_reader:
-                peptide = line[0]
-                peptides_exp[peptide] = {}
-                for i in tissues:
-                    peptides_exp[peptide][tissues[i]] = float(line[i])
-
-        peptide_exp = {}
-        for gene in accessions:
-            peptide_exp[gene] = {tissue: sum([peptides_exp[peptide][tissue]
-                                    for peptide in peptides[gene]])
-                                 for tissue in peptides_exp[peptide]}
-
-            # Compensation for incosistent tissue designation
-            peptide_exp[gene]["Adrenal"] = peptide_exp[gene]["Adrenal Gland"]
-            del peptide_exp[gene]["Adrenal Gland"]
 
         accession_exp = {}
         with open(pathway_db_exp_prot_fp, "r") as protein_exp_file:
@@ -2675,49 +2658,36 @@ def build_expression_table(
 
         protein_exp = {}
         for gene in accessions:
-            protein_exp[gene] = {tissue: sum(
-                                    [accession_exp[accession][tissue]
-                                    for accession in accessions[gene]])
+            protein_exp[gene] = {tissue: sum([accession_exp[accession][tissue]
+                                 for accession in accessions[gene]])
                                  for tissue in accession_exp[accession]}
 
         tissues = tissues.values()
-        num_tissues = len(tissues)
 
-    tsv_file = open(pathway_db_tsv_exp_fp, "w", buffering=1)
-    tsv_writer = csv.writer(tsv_file, delimiter="\t", lineterminator="\n")
+    prot_tsv_file = open(pathway_db_tsv_prot_exp_fp, "w", buffering=1)
+    prot_tsv_writer = csv.writer(prot_tsv_file, delimiter="\t",
+                                 lineterminator="\n")
     tsv_header = ["Gene",
                   "Synonym",
                   "Tissue",
-                  "Gene_Expression",
-                  "Gene_Expression_z-Score",
-                  "Gene_Expression_p-Value",
-                  "Peptide_Expression",
-                  "Peptide_Expression_z-Score",
-                  "Peptide_Expression_p-Value",
-                  "Protein_Expression",
-                  "Protein_Expression_z-Score",
-                  "Protein_Expression_p-Value"]
-    tsv_writer.writerow(tsv_header)
+                  "Expression",
+                  "z-Score",
+                  "p-Value"]
+    prot_tsv_writer.writerow(tsv_header)
 
     pathway_db_cursor.execute("""
         DROP TABLE IF EXISTS
-            Expression
+            ProteinExpression
         """)
 
     pathway_db_cursor.execute("""
         CREATE TABLE
-            Expression (
+            ProteinExpression (
                 gene TEXT,
                 tissue TEXT,
-                gene_exp REAL,
-                gene_exp_z REAL,
-                gene_exp_p REAL,
-                peptide_exp REAL,
-                peptide_exp_z REAL,
-                peptide_exp_p REAL,
-                protein_exp REAL,
-                protein_exp_z REAL,
-                protein_exp_p REAL,
+                exp REAL,
+                exp_z REAL,
+                exp_p REAL,
                 PRIMARY KEY (
                     gene,
                     tissue)
@@ -2725,11 +2695,7 @@ def build_expression_table(
             """)
 
     if num_genes:
-        exp_genes = [gene for gene in genes
-                     if gene in gene_exp and
-                        gene in peptide_exp and
-                        gene in protein_exp]
-
+        exp_genes = [gene for gene in genes if gene in protein_exp]
         num_exp_genes = len(exp_genes)
         coverage = " ({:.2f}%)".format((num_exp_genes/num_genes)*100)
 
@@ -2744,64 +2710,49 @@ def build_expression_table(
         gene_num = progressbar.ProgressBar(max_value=num_exp_genes)
         gene_num.update(0)
 
-    pool = multiprocessing.Pool(processes=3)
     for i, gene in enumerate(exp_genes, 1):
-        exp = pool.map(
-                normalize_distribution,
-                [gene_exp[gene], peptide_exp[gene], protein_exp[gene]])
+        exp = normalize_distribution(protein_exp[gene])
         for tissue in sorted(tissues):
             pathway_db_cursor.execute("""
                 INSERT INTO
-                    Expression
+                    ProteinExpression
                 VALUES
-                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (?, ?, ?, ?, ?)
                 """,
                 (gene,
                 tissue,
-                exp[0][tissue][0],
-                exp[0][tissue][1],
-                exp[0][tissue][2],
-                exp[1][tissue][0],
-                exp[1][tissue][1],
-                exp[1][tissue][2],
-                exp[2][tissue][0],
-                exp[2][tissue][1],
-                exp[2][tissue][2]))
+                exp[tissue][0],
+                exp[tissue][1],
+                exp[tissue][2]))
 
-            tsv_writer.writerow([
+            prot_tsv_writer.writerow([
                 gene,
                 input_gene_name[gene],
                 tissue,
-                exp[0][tissue][0],
-                exp[0][tissue][1],
-                exp[0][tissue][2],
-                exp[1][tissue][0],
-                exp[1][tissue][1],
-                exp[1][tissue][2],
-                exp[2][tissue][0],
-                exp[2][tissue][1],
-                exp[2][tissue][2]])
+                exp[tissue][0],
+                exp[tissue][1],
+                exp[tissue][2]])
 
         pathway_db.commit()
         gene_num.update(i)
 
-    pool.close()
-    tsv_file.close()
+    prot_tsv_file.close()
 
     return None
 
 def build_pathway_db(
         pathway_db_fp,
         pathway_db_tmp_fp,
-        pathway_db_tsv_exp_fp,
+        pathway_db_tsv_gene_exp_fp,
+        pathway_db_tsv_prot_exp_fp,
         pathway_db_tsv_pw_fp,
         pathway_db_log_fp,
+        expression_table_fp,
         pathway_db_gene_map_fp,
-        pathway_db_exp_gene_fp,
-        pathway_db_exp_pept_fp,
         pathway_db_exp_prot_fp,
         pathway_db_gene_sym_fp,
-        pathway_db_gene_name_fp):
+        pathway_db_gene_name_fp,
+        num_processes):
     """"""
     logging.getLogger("requests").setLevel(logging.CRITICAL)
     logging.basicConfig(
@@ -3015,10 +2966,11 @@ def build_pathway_db(
     logging.info("Number of genes including up- and downstream genes: %s",
         num_genes)
 
-    build_expression_table(pathway_db, pathway_db_cursor,
-                           pathway_db_tsv_exp_fp, pathway_db_gene_map_fp,
-                           pathway_db_exp_gene_fp, pathway_db_exp_pept_fp,
-                           pathway_db_exp_prot_fp, input_genes, num_genes)
+    build_expression_tables(pathway_db, pathway_db_cursor,
+                            pathway_db_tsv_gene_exp_fp,
+                            pathway_db_tsv_prot_exp_fp, expression_table_fp,
+                            pathway_db_gene_map_fp, pathway_db_exp_prot_fp,
+                            input_genes, num_genes, num_processes)
 
     pathway_db.close()
     os.rename(pathway_db_tmp_fp, pathway_db_fp)
@@ -3141,43 +3093,22 @@ def produce_pathway_summary(
     exp = {}
     for i, gene in enumerate(gene_ids, 1):
         exp[gene] = {}
-        for (tissue, gene_exp, gene_exp_z, gene_exp_p, peptide_exp,
-             peptide_exp_z, peptide_exp_p, protein_exp, protein_exp_z,
-             protein_exp_p) in pathway_db_cursor.execute("""
+        for (tissue, exp, exp_z, exp_p) in pathway_db_cursor.execute("""
                 SELECT
                     tissue,
-                    gene_exp,
-                    gene_exp_z,
-                    gene_exp_p,
-                    peptide_exp,
-                    peptide_exp_z,
-                    peptide_exp_p,
-                    protein_exp,
-                    protein_exp_z,
-                    protein_exp_p
+                    exp,
+                    exp_z,
+                    exp_p,
                 FROM
-                    Expression
+                    ProteinExpression
                 WHERE
                     gene = ?
                 """, (gene,)):
 
             exp[gene][tissue] = {
-                "gene": {
-                    "exp": gene_exp,
-                    "z-score": gene_exp_z,
-                    "p-value": gene_exp_p
-                },
-                "peptide": {
-                    "exp": peptide_exp,
-                    "z-score": peptide_exp_z,
-                    "p-value": peptide_exp_p
-                },
-                "protein": {
-                    "exp": protein_exp,
-                    "z-score": protein_exp_z,
-                    "p-value": protein_exp_p
-                }
-            }
+                    "exp": exp,
+                    "z-score": exp_z,
+                    "p-value": exp_p}
 
         gene_num.update(i)
 
@@ -3213,15 +3144,9 @@ def produce_pathway_summary(
         "Pathway",
         "Pathway_Name",
         "Tissue",
-        "Gene_Level_Expression",
-        "Gene_Level_Expression_z-Score",
-        "Gene_Level_Expression_p-Value",
-        "Peptide_Level_Expression",
-        "Peptide_Level_Expression_z-Score",
-        "Peptide_Level_Expression_p-Value",
-        "Protein_Level_Expression",
-        "Protein_Level_Expression_z-Score",
-        "Protein_Level_Expression_p-Value",
+        "Expression",
+        "Expression_z-Score",
+        "Expression_p-Value",
         "Up_Down_Stream_Gene",
         "Upstream",
         "Downstream",
@@ -3229,15 +3154,9 @@ def produce_pathway_summary(
         "Downregulating",
         "Upregulated",
         "Downregulated",
-        "Up_Down_Stream_Gene_Gene_Level_Expression",
-        "Up_Down_Stream_Gene_Gene_Level_Expression_z-Score",
-        "Up_Down_Stream_Gene_Gene_Level_Expression_p-Value"
-        "Up_Down_Stream_Gene_Peptide_Level_Expression",
-        "Up_Down_Stream_Gene_Peptide_Level_Expression_z-Score",
-        "Up_Down_Stream_Gene_Peptide_Level_Expression_p-Value"
-        "Up_Down_Stream_Gene_Protein_Level_Expression",
-        "Up_Down_Stream_Gene_Protein_Level_Expression_z-Score",
-        "Up_Down_Stream_Gene_Protein_Level_Expression_p-Value"]
+        "Up_Down_Stream_Expression",
+        "Up_Down_Stream_Expression_z-Score",
+        "Up_Down_Stream_Expression_p-Value"]
     summary_writer.writerow(summary_header)
 
     num_rows = 0
@@ -3273,13 +3192,10 @@ def produce_pathway_summary(
                         if exp[gene]:
                             to_file.extend([
                                 "{:.4f}".format(
-                                    exp[gene][tissue][level][measure])
-                                    for level in
-                                        ("gene", "peptide", "protein")
-                                    for measure in
-                                        ("exp", "z-score", "p-value")])
+                                 exp[gene][tissue][measure])
+                                 for measure in ("exp", "z-score", "p-value")])
                         else:
-                            to_file.extend(["NA" for i in range(9)])
+                            to_file.extend(["NA" for i in range(3)])
 
                         to_file.extend([
                             up_down_stream_gene,
@@ -3307,14 +3223,10 @@ def produce_pathway_summary(
                         if exp[up_down_stream_gene]:
                             to_file.extend([
                                 "{:.4f}".format(
-                                exp[up_down_stream_gene][tissue][
-                                    level][measure])
-                                    for level in
-                                        ("gene", "peptide", "protein")
-                                    for measure in
-                                        ("exp", "z-score", "p-value")])
+                                exp[up_down_stream_gene][tissue][measure])
+                                for measure in ("exp", "z-score", "p-value")])
                         else:
-                            to_file.extend(["NA" for i in range(9)])
+                            to_file.extend(["NA" for i in range(3)])
 
                         summary_writer.writerow(to_file)
 
