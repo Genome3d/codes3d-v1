@@ -2326,10 +2326,6 @@ def wikipathways(input_gene,
                  exclude_homology_mappings=True):
     """"""
     wikipathways_api_url = "https://webservice.wikipathways.org"
-    nsmap = {"ns1": "http://www.wso2.org/php/xsd",
-             "ns2": "http://www.wikipathways.org/webservice",
-             "gpml": "http://pathvisio.org/GPML/2013a"}
-
     discard_tags = {"Curation:Tutorial",
                     "Curation:UnderConstruction",
                     "Curation:Hypothetical"}
@@ -2347,11 +2343,11 @@ def wikipathways(input_gene,
         return []
 
     pathways = []
-    for result in response.findall("ns1:result", nsmap):
+    for result in response.findall("ns1:result", response.nsmap):
         pathway = {}
-        pathway["id"] = result.find("ns2:id", nsmap).text
-        pathway["revision"] = result.find("ns2:revision", nsmap).text
-        pathway["name"] = result.find("ns2:name", nsmap).text
+        pathway["id"] = result.find("ns2:id", response.nsmap).text
+        pathway["revision"] = result.find("ns2:revision", response.nsmap).text
+        pathway["name"] = result.find("ns2:name", response.nsmap).text
 
         pathway["input"] = {}
         pathway["output"] = {}
@@ -2365,8 +2361,8 @@ def wikipathways(input_gene,
         if response is None:
             continue
 
-        for tag in response.findall("ns1:tags", nsmap):
-            if tag.find("ns2:name", nsmap).text in discard_tags:
+        for tag in response.findall("ns1:tags", response.nsmap):
+            if tag.find("ns2:name", response.nsmap).text in discard_tags:
                 pathways.remove(pathway)
                 break
 
@@ -2380,7 +2376,8 @@ def wikipathways(input_gene,
 
         homology_mapped_pathway = False
         if exclude_homology_mappings:
-            for comment in response.findall("gpml:Comment", nsmap):
+            for comment in response.findall(
+                    "{{{}}}Comment".format(response.nsmap[None])):
                 if comment.get("Source") == "HomologyMapper":
                     homology = True
                     break
@@ -2389,7 +2386,8 @@ def wikipathways(input_gene,
             continue
 
         group_to_graph, graph_to_group = {}, {}
-        for group in response.findall("gpml:Group", nsmap):
+        for group in response.findall("{{{}}}Group".format(
+            response.nsmap[None])):
             group_id = group.get("GroupId")
             graph_id = group.get("GraphId")
             if graph_id:
@@ -2399,7 +2397,8 @@ def wikipathways(input_gene,
         graph_ids = set()
         corrected_name = {}
 
-        for data_node in response.findall("gpml:DataNode", nsmap):
+        for data_node in response.findall("{{{}}}DataNode".format(
+            response.nsmap[None])):
             text_label = data_node.attrib["TextLabel"]
 
             if isinstance(text_label, str):
@@ -2417,13 +2416,14 @@ def wikipathways(input_gene,
         input_ids = {"non-group": {}, "group": {}}
         output_ids = {"non-group": {}, "group": {}}
 
-        for interaction in response.findall("gpml:Interaction", nsmap):
-            points = interaction.find(
-                    "gpml:Graphics", nsmap).findall("gpml:Point", nsmap)
+        for interaction in response.findall("{{{}}}Interaction".format(
+            response.nsmap[None])):
+            points = interaction.find("{{{}}}Graphics".format(
+                response.nsmap[None])).findall(
+                    "{{{}}}Point".format(response.nsmap[None]))
 
             input_ref = points[0].get("GraphRef")
             output_ref = points[-1].get("GraphRef")
-
             regulation_type = points[-1].get("ArrowHead")
 
             if input_ref in graph_ids:
@@ -2445,10 +2445,9 @@ def wikipathways(input_gene,
             output_ids["non-group"] or
             output_ids["group"]):
 
-            for data_node in response.findall("gpml:DataNode", nsmap):
-                if (data_node.get("Type") == "GeneProduct" and
-                    data_node.find("gpml:Xref", nsmap).get("Database") and
-                    data_node.find("gpml:Xref", nsmap).get("ID")):
+            for data_node in response.findall("{{{}}}DataNode".format(
+                response.nsmap[None])):
+                if data_node.get("Type") == "GeneProduct":
                     graph_id = data_node.get("GraphId")
                     group_ref = data_node.get("GroupRef")
 
