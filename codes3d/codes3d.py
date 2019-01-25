@@ -2058,12 +2058,13 @@ def kegg(gene):
     pathway_ids = [entry.split("\t")[1].split(":")[1]
                    for entry in pathway_entries if entry]
 
-    name = {}
+    pathways = {}
     for pathway_id in pathway_ids:
+        pathways[pathway_id] = {}
         response = request("{}/get/{}".format(kegg_api_url, pathway_id))
 
         if response is None:
-            name[pathway_id] = "NA"
+            pathways[pathway_id]["name"] = "NA"
             continue
 
         pathway_entries = response.split("\n")
@@ -2072,19 +2073,16 @@ def kegg(gene):
             if entry.startswith("NAME"):
                 pathway_name = entry.replace("NAME", "").replace(
                     "- Homo sapiens (human)", "").strip()
-                name[pathway_id] = pathway_name
+                pathways[pathway_id]["name"] = pathway_name
                 break
 
-    version = {}
-    up_down_stream = {}
     for pathway_id in pathway_ids:
         response = request("{}/get/{}/kgml".format(kegg_api_url, pathway_id))
 
         if response is None:
-            version[pathway_id] = "NA"
-            up_down_stream[pathway_id] = {}
-            up_down_stream[pathway_id]["upstream"] = set()
-            up_down_stream[pathway_id]["downstream"] = set()
+            pathways[pathway_id]["version"] = "NA"
+            pathways[pathway_id]["upstream"] = set()
+            pathways[pathway_id]["downstream"] = set()
 
         else:
             header_comment, response = response
@@ -2154,15 +2152,14 @@ def kegg(gene):
             else:
                 upstream_genes, downstream_genes = set(), set()
 
-            up_down_stream[pathway_id] = {}
-            up_down_stream[pathway_id]["upstream"] = upstream_genes
-            up_down_stream[pathway_id]["downstream"] = downstream_genes
+            pathways[pathway_id]["upstream"] = upstream_genes
+            pathways[pathway_id]["downstream"] = downstream_genes
 
             months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul",
                       "Aug", "Sep", "Oct", "Nov", "Dec"]
 
             if (header_comment and
-                header_comment.startswith(" Creation date: ") and
+                header_comment[:16] == " Creation date: " and
                 len(header_comment.split(" ")) > 5 and
                 header_comment.split(" ")[3] in months):
                 header_comment = header_comment.split(" ")
@@ -2170,26 +2167,25 @@ def kegg(gene):
                 day = header_comment[4].replace(",", "")
                 year = header_comment[5]
                 pathway_version = "-".join([year, month, day])
-                version[pathway_id] = pathway_version
+                pathways[pathway_id]["version"] = pathway_version
             else:
-                version[pathway_id] = "NA"
+                pathways[pathway_id]["version"] = "NA"
 
     pathways = [[unicode(gene, "utf-8"),
                  unicode(pathway_id),
-                 unicode(version[pathway_id]),
-                 unicode(name[pathway_id]),
-                 tuple(sorted(list(up_down_stream[pathway_id]["upstream"]))),
-                 tuple(sorted(list(up_down_stream[pathway_id]["downstream"])))]
+                 unicode(pathways[pathway_id]["version"]),
+                 unicode(pathways[pathway_id]["name"]),
+                 tuple(sorted(list(pathways[pathway_id]["upstream"]))),
+                 tuple(sorted(list(pathways[pathway_id]["downstream"])))]
                  for pathway_id in pathway_ids
-                 if up_down_stream[pathway_id]["upstream"] or
-                    up_down_stream[pathway_id]["upstream"]]
+                 if pathways[pathway_id]["upstream"] or
+                    pathways[pathway_id]["downstream"]]
 
     return sorted(pathways, key=lambda pathway: pathway[1])
 
 class GeneName():
     """"""
-
-    def __init__(self):
+    def __init__(self, pathway_db_gene_name_fp):
         # Reactome
         # Phosphorylation
         # self.mod = re.compile(
@@ -2198,15 +2194,17 @@ class GeneName():
         # WikiPathways
         # Integer
         self.integer = re.compile("^[0-9]+$")
-        # Protein
-        self.protein = re.compile("([A-Z]|[a-z]|[0-9]|-)*in")
-        # Enzyme
-        self.enzyme = re.compile("([A-Z]|[a-z]|[0-9]|-)*ase")
-        # Prefixes: c; c-
-        self.prefix = re.compile("^(c|c-)")
-        # Suffixes: a,-c; m/n; n
-        self.suffix = re.compile("(a,-c|m/n|n)$")
 
+        self.synonym = {}
+        with open(pathway_db_gene_name_fp) as gene_syn_file:
+            gene_syn_reader = csv.reader(gene_syn_file, delimiter="\t")
+            next(gene_syn_reader)
+
+            for row in gene_syn_reader:
+                if row[1] != "-":
+                    for syn in row[1].split("|"):
+                        self.synonym[syn.lower()] = row[0]
+                self.synonym[row[2].lower()] = row[0]
 
     def reactome(self, gene_name):
         if self.mod.search(gene_name):
@@ -2214,22 +2212,14 @@ class GeneName():
 
         return gene_name
 
-    def wikipathways(self, gene_name):
+    def correct(self, gene_name):
         gene_name = gene_name.strip(" ()?*")
         gene_name = gene_name.split("(")[0].strip()
 
-        if (self.integer.match(gene_name) or
-            self.protein.match(gene_name) or
-            self.enzyme.match(gene_name)):
+        if self.integer.match(gene_name):
             return None
 
-        if self.prefix.search(gene_name):
-            gene_name = re.sub(self.prefix, "", gene_name)
-
-        if self.suffix.search(gene_name):
-            gene_name = re.sub(self.suffix, "", gene_name)
-
-        return gene_name
+        return self.synonym.get(gene_name.lower(), gene_name)
 
 def reactome(gene):
     """"""
@@ -2331,8 +2321,10 @@ def reactome(gene):
 
     return sorted(pathways, key=lambda pathway: pathway[1])
 
-def wikipathways(gene, exclude_reactome=False, exclude_homology_mappings=True):
-    """Query WikiPathways for HGNC-Gene-ID"""
+def wikipathways(input_gene,
+                 exclude_reactome=False,
+                 exclude_homology_mappings=True):
+    """"""
     wikipathways_api_url = "https://webservice.wikipathways.org"
     nsmap = {"ns1": "http://www.wso2.org/php/xsd",
              "ns2": "http://www.wikipathways.org/webservice",
@@ -2344,6 +2336,8 @@ def wikipathways(gene, exclude_reactome=False, exclude_homology_mappings=True):
 
     if exclude_reactome:
         discard_tags.add("Curation:Reactome_Approved")
+
+    gene = gene_name.correct(input_gene)
 
     response = request(
         "{}/findPathwaysByText?query={}&species=Homo_sapiens".format(
@@ -2409,7 +2403,7 @@ def wikipathways(gene, exclude_reactome=False, exclude_homology_mappings=True):
             text_label = data_node.attrib["TextLabel"]
 
             if isinstance(text_label, str):
-                corrected_name[text_label] = gene_name.wikipathways(text_label)
+                corrected_name[text_label] = gene_name.correct(text_label)
 
                 if corrected_name[text_label] == gene:
                     graph_id = data_node.get("GraphId")
@@ -2504,6 +2498,7 @@ def wikipathways(gene, exclude_reactome=False, exclude_homology_mappings=True):
                                 pathway["output"][name][1] = True
 
     pathways = [[unicode(gene, "utf-8"),
+                 unicode(input_gene, "utf-8"),
                  unicode(pathway["id"], "utf-8"),
                  unicode(pathway["revision"], "utf-8"),
                  unicode(pathway["name"], "utf-8"),
@@ -2563,6 +2558,7 @@ def log_wikipathways_release():
     return None
 
 def normalize_distribution(exp):
+    """"""
     tissues = exp.keys()
 
     mean = sum([exp[tissue] for tissue in tissues])/len(tissues)
@@ -2593,10 +2589,14 @@ def build_expression_table(
         pathway_db_exp_prot_fp,
         genes,
         num_genes):
-
     """"""
-
     if num_genes:
+        input_gene_name = {}
+        for i in range(len(genes)):
+            inp = genes[i]
+            genes[i] = gene_name.correct(genes[i])
+            input_gene_name[genes[i]] = inp
+
         gene_exp = {}
         with open(pathway_db_exp_gene_fp, "r") as gene_exp_file:
             gene_exp_reader = csv.reader(gene_exp_file)
@@ -2687,6 +2687,7 @@ def build_expression_table(
     tsv_file = open(pathway_db_tsv_exp_fp, "w", buffering=1)
     tsv_writer = csv.writer(tsv_file, delimiter="\t", lineterminator="\n")
     tsv_header = ["Gene",
+                  "Synonym",
                   "Tissue",
                   "Gene_Expression",
                   "Gene_Expression_z-Score",
@@ -2770,6 +2771,7 @@ def build_expression_table(
 
             tsv_writer.writerow([
                 gene,
+                input_gene_name[gene],
                 tissue,
                 exp[0][tissue][0],
                 exp[0][tissue][1],
@@ -2799,10 +2801,9 @@ def build_pathway_db(
         pathway_db_exp_gene_fp,
         pathway_db_exp_pept_fp,
         pathway_db_exp_prot_fp,
-        hgnc_gene_sym_fp):
-
+        pathway_db_gene_sym_fp,
+        pathway_db_gene_name_fp):
     """"""
-
     logging.getLogger("requests").setLevel(logging.CRITICAL)
     logging.basicConfig(
         filename=pathway_db_log_fp,
@@ -2817,8 +2818,8 @@ def build_pathway_db(
     pathway_db_cursor = pathway_db.cursor()
 
     input_genes = []
-    with open(hgnc_gene_sym_fp, "r") as hgnc_gene_file:
-        for gene in hgnc_gene_file:
+    with open(pathway_db_gene_sym_fp, "r") as gene_sym_file:
+        for gene in gene_sym_file:
                 gene = gene.strip()
                 if gene and gene not in input_genes:
                     input_genes.append(gene)
@@ -2832,6 +2833,7 @@ def build_pathway_db(
     tsv_file = open(pathway_db_tsv_pw_fp, "w", buffering=1)
     tsv_writer = csv.writer(tsv_file, delimiter="\t", lineterminator="\n")
     tsv_header = ["Gene",
+                  "Synonym",
                   "Pathway",
                   "Pathway_Version",
                   "Pathway_Name",
@@ -2914,7 +2916,7 @@ def build_pathway_db(
     logging.info("Number of input genes: %s", num_input_genes)
 
     global gene_name
-    gene_name = GeneName()
+    gene_name = GeneName(pathway_db_gene_name_fp)
 
     all_up_down_stream_genes = set()
     num_pathways_available = 0
@@ -2929,20 +2931,20 @@ def build_pathway_db(
                     Pathways
                 VALUES
                     (?, ?)
-                """, (pathway[1], pathway[0]))
+                """, (pathway[2], pathway[1]))
 
             pathway_db_cursor.execute("""
                 INSERT INTO
                     PathwayNames
                 VALUES
                     (?, ?)
-                """, (pathway[1], pathway[3]))
+                """, (pathway[2], pathway[4]))
 
             entries = [
-                (pathway[1], pathway[0], upstream_gene,
-                    int(pathway[4][upstream_gene][0]),
-                    int(pathway[4][upstream_gene][1]))
-                for upstream_gene in pathway[4]]
+                (pathway[2], pathway[1], upstream_gene,
+                    int(pathway[5][upstream_gene][0]),
+                    int(pathway[5][upstream_gene][1]))
+                for upstream_gene in pathway[5]]
 
             for entry in entries:
                 pathway_db_cursor.execute("""
@@ -2953,10 +2955,10 @@ def build_pathway_db(
                     """, entry)
 
             entries = [
-                (pathway[1], pathway[0], upstream_gene,
-                    int(pathway[5][upstream_gene][0]),
-                    int(pathway[5][upstream_gene][1]))
-                for upstream_gene in pathway[5]]
+                (pathway[2], pathway[1], upstream_gene,
+                    int(pathway[6][upstream_gene][0]),
+                    int(pathway[6][upstream_gene][1]))
+                for upstream_gene in pathway[6]]
 
             for entry in entries:
                 pathway_db_cursor.execute("""
@@ -2966,25 +2968,26 @@ def build_pathway_db(
                         (?, ?, ?, ?, ?)
                     """, entry)
 
-            up_down_stream_genes = set(pathway[4]) | set(pathway[5])
+            up_down_stream_genes = set(pathway[5]) | set(pathway[6])
 
-            tsv_row = [entry.encode("utf-8") for entry in pathway[:4]]
+            tsv_row = [entry.encode("utf-8") for entry in pathway[:5]]
             tsv_rows = [
                    [tsv_row[0],
                     tsv_row[1],
                     tsv_row[2],
                     tsv_row[3],
+                    tsv_row[4],
                     up_down_stream_gene.encode("utf-8"),
-                    up_down_stream_gene in pathway[4],
                     up_down_stream_gene in pathway[5],
-                    (up_down_stream_gene in pathway[4] and
-                        pathway[4][up_down_stream_gene][0]),
-                    (up_down_stream_gene in pathway[4] and
-                        pathway[4][up_down_stream_gene][1]),
+                    up_down_stream_gene in pathway[6],
                     (up_down_stream_gene in pathway[5] and
                         pathway[5][up_down_stream_gene][0]),
                     (up_down_stream_gene in pathway[5] and
-                        pathway[5][up_down_stream_gene][1])]
+                        pathway[5][up_down_stream_gene][1]),
+                    (up_down_stream_gene in pathway[6] and
+                        pathway[6][up_down_stream_gene][0]),
+                    (up_down_stream_gene in pathway[6] and
+                        pathway[6][up_down_stream_gene][1])]
                     for up_down_stream_gene in sorted(up_down_stream_genes)]
 
             for tsv_row in tsv_rows:
@@ -3223,6 +3226,10 @@ def produce_pathway_summary(
         "Up_Down_Stream_Gene",
         "Upstream",
         "Downstream",
+        "Upregulating",
+        "Downregulating",
+        "Upregulated",
+        "Downregulated",
         "Up_Down_Stream_Gene_Gene_Level_Expression",
         "Up_Down_Stream_Gene_Gene_Level_Expression_z-Score",
         "Up_Down_Stream_Gene_Gene_Level_Expression_p-Value"
@@ -3277,16 +3284,32 @@ def produce_pathway_summary(
 
                         to_file.extend([
                             up_down_stream_gene,
-                            up_down_stream_gene in pathways[gene][
-                                (database, pathway)]["upstream"],
-                            up_down_stream_gene in pathways[gene][
-                                (database, pathway)]["downstream"]])
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "upstream"],
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "downstream"],
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "upstream"] and
+                            pathways[gene][pathway]["upstream"][
+                                up_down_stream_gene][0],
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "upstream"] and
+                            pathways[gene][pathway]["upstream"][
+                                up_down_stream_gene][1],
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "downstream"] and
+                            pathways[gene][pathway]["downstream"][
+                                up_down_stream_gene][0],
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "downstream"] and
+                            pathways[gene][pathway]["downstream"][
+                                up_down_stream_gene][1]])
 
                         if exp[up_down_stream_gene]:
                             to_file.extend([
                                 "{:.4f}".format(
-                                exp[
-                                  up_down_stream_gene][tissue][level][measure])
+                                exp[up_down_stream_gene][tissue][
+                                    level][measure])
                                     for level in
                                         ("gene", "peptide", "protein")
                                     for measure in
