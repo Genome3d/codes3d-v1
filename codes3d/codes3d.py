@@ -2567,8 +2567,8 @@ def get_exp(args):
 
     if isinstance(exp, numpy.float64):
         return exp
-    if isinstance(exp, numpy.ndarray):
-        return exp.max
+    elif isinstance(exp, numpy.ndarray):
+        return exp.max()
 
 def normalize_distribution(exp):
     """"""
@@ -2579,14 +2579,11 @@ def normalize_distribution(exp):
                     (len(tissues) - 1))
 
     if sdv == 0.0:
-        exp_z = {tissue: 0.0
-                 for tissue in tissues}
+        exp_z = {tissue: 0.0 for tissue in tissues}
     else:
-        exp_z = {tissue: (exp[tissue] - mean) / sdv
-                 for tissue in tissues}
+        exp_z = {tissue: (exp[tissue] - mean) / sdv for tissue in tissues}
 
-    exp_p = {tissue: 1 - st.norm.cdf(exp_z[tissue])
-               for tissue in tissues}
+    exp_p = {tissue: 1 - st.norm.cdf(exp_z[tissue]) for tissue in tissues}
 
     exp = {tissue: (exp[tissue], exp_z[tissue], exp_p[tissue])
            for tissue in tissues}
