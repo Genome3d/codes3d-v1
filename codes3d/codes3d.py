@@ -1080,8 +1080,8 @@ def produce_summary(
     print("\n\tMultiprocessing with {} processes:".format(num_processes))
     print("\tCollecting {} tissue-specific gene expression rates...".format(
           len(gene_ids) * len(tissues)))
-    exp = pool.map(get_expression, ((gene, tissue)
-            for gene in gene_ids for tissue in tissues))
+    exp = pool.map(get_expression, [(gene, tissue)
+            for gene in gene_ids for tissue in tissues])
     gene_exp = {gene: {tissue: exp.pop(0)
                 for tissue in tissues} for gene in gene_ids}
     del GENE_DF
@@ -2565,29 +2565,31 @@ def get_exp(args):
     except KeyError:
         return None
 
-    if isinstance(exp, numpy.int64):
+    if isinstance(exp, numpy.float64):
         return exp
-    elif isinstance(exp, numpy.ndarray):
-        return exp.max()
+    if isinstance(exp, numpy.ndarray):
+        return exp.max
 
 def normalize_distribution(exp):
     """"""
     tissues = exp.keys()
 
     mean = sum([exp[tissue] for tissue in tissues])/len(tissues)
-    sdv = math.sqrt(sum([(exp[tissue] - mean)**2
-                        for tissue in tissues])/(len(tissues) - 1))
+    sdv = math.sqrt(sum([(exp[tissue] - mean)**2 for tissue in tissues])/\
+                    (len(tissues) - 1))
+
     if sdv == 0.0:
-        exp_z = {tissue: 0.0 for tissue in tissues}
+        exp_z = {tissue: 0.0
+                 for tissue in tissues}
     else:
         exp_z = {tissue: (exp[tissue] - mean) / sdv
-                    for tissue in tissues}
+                 for tissue in tissues}
 
-    exp_sig = {tissue: 1 - st.norm.cdf(exp_z[tissue])
-                for tissue in tissues}
+    exp_p = {tissue: 1 - st.norm.cdf(exp_z[tissue])
+               for tissue in tissues}
 
-    for tissue in tissues:
-        exp[tissue] = (exp[tissue], exp_z[tissue], exp_sig[tissue])
+    exp = {tissue: (exp[tissue], exp_z[tissue], exp_p[tissue])
+           for tissue in tissues}
 
     return exp
 
@@ -2620,11 +2622,24 @@ def build_expression_tables(
         num_processes = min(num_processes, len(current_process.cpu_affinity()))
         pool = multiprocessing.Pool(processes=num_processes)
 
-        tissues = list(GENE_DF)
+        gtex_tissues = list(GENE_DF)
 
-        exp_values = pool.map(get_exp,
-                [(gene, tissue) for gene in genes for tissue in tissues])
+        exp = pool.map(get_exp,
+                [(gene, tissue) for gene in genes for tissue in gtex_tissues])
 
+        gene_exp = {gene: {tissue: exp.pop(0)
+                           for tissue in gtex_tissues}
+                    for gene in genes}
+
+        del GENE_DF
+        pool.close()
+
+        for gene in gene_exp.keys():
+            for tissue in gene_exp[gene].keys():
+                if not gene_exp[gene][tissue]:
+                    del gene_exp[gene][tissue]
+            if not gene_exp[gene]:
+                del gene_exp[gene]
 
         accessions = {}
         with open(pathway_db_gene_map_fp, "r") as gene_map_file:
@@ -2632,39 +2647,41 @@ def build_expression_tables(
             next(gene_map_reader)
 
             for line in gene_map_reader:
-                if line[4] == "True":
-                    gene = line[3]
-                    if gene not in genes:
-                        continue
+                gene = line[3]
+                if gene not in genes:
+                    continue
 
-                    if gene not in accessions:
-                        accessions[gene] = set()
-                    accessions[gene].add(line[2].split("|")[1])
+                if gene not in accessions:
+                    accessions[gene] = set()
+                accessions[gene].add(line[2].split("|")[1])
 
         accession_exp = {}
         with open(pathway_db_exp_prot_fp, "r") as protein_exp_file:
             protein_exp_reader = csv.reader(protein_exp_file)
             header = next(protein_exp_reader)
 
-            tissues = {i: header[i].replace("Adult ", "")
-                       for i in range(len(header))
-                       if header[i].startswith("Adult ")}
+            hpm_tissues = {i: header[i].replace("Adult ", "")
+                           for i in range(len(header))
+                           if header[i][:6] == "Adult "}
 
             for line in protein_exp_reader:
                 accession = line[0]
                 accession_exp[accession] = {}
-                for i in tissues:
-                    accession_exp[accession][tissues[i]] = float(line[i])
+                for i in hpm_tissues:
+                    accession_exp[accession][hpm_tissues[i]] = float(line[i])
 
-        protein_exp = {}
+        hpm_tissues = sorted(hpm_tissues.values())
+
+        prot_exp = {}
         for gene in accessions:
-            protein_exp[gene] = {tissue: sum([accession_exp[accession][tissue]
-                                 for accession in accessions[gene]])
-                                 for tissue in accession_exp[accession]}
+            prot_exp[gene] = {tissue: sum([accession_exp[accession][tissue]
+                              for accession in accessions[gene]])
+                              for tissue in accession_exp[accession]}
 
-        tissues = tissues.values()
-
+    gene_tsv_file = open(pathway_db_tsv_gene_exp_fp, "w", buffering=1)
     prot_tsv_file = open(pathway_db_tsv_prot_exp_fp, "w", buffering=1)
+    gene_tsv_writer = csv.writer(gene_tsv_file, delimiter="\t",
+                                 lineterminator="\n")
     prot_tsv_writer = csv.writer(prot_tsv_file, delimiter="\t",
                                  lineterminator="\n")
     tsv_header = ["Gene",
@@ -2673,13 +2690,31 @@ def build_expression_tables(
                   "Expression",
                   "z-Score",
                   "p-Value"]
+    gene_tsv_writer.writerow(tsv_header)
     prot_tsv_writer.writerow(tsv_header)
 
+    pathway_db_cursor.execute("""
+        DROP TABLE IF EXISTS
+            GeneExpression
+        """)
     pathway_db_cursor.execute("""
         DROP TABLE IF EXISTS
             ProteinExpression
         """)
 
+    pathway_db_cursor.execute("""
+        CREATE TABLE
+            GeneExpression (
+                gene TEXT,
+                tissue TEXT,
+                exp REAL,
+                exp_z REAL,
+                exp_p REAL,
+                PRIMARY KEY (
+                    gene,
+                    tissue)
+                ON CONFLICT IGNORE)
+            """)
     pathway_db_cursor.execute("""
         CREATE TABLE
             ProteinExpression (
@@ -2695,24 +2730,29 @@ def build_expression_tables(
             """)
 
     if num_genes:
-        exp_genes = [gene for gene in genes if gene in protein_exp]
-        num_exp_genes = len(exp_genes)
-        coverage = " ({:.2f}%)".format((num_exp_genes/num_genes)*100)
+        gene_exp_genes = [gene for gene in genes if gene in gene_exp]
+        prot_exp_genes = [gene for gene in genes if gene in prot_exp]
+        num_gene_exp_genes = len(gene_exp_genes)
+        num_prot_exp_genes = len(prot_exp_genes)
+        gene_coverage = " ({:.2f}%)".format((num_gene_exp_genes/num_genes)*100)
+        prot_coverage = " ({:.2f}%)".format((num_prot_exp_genes/num_genes)*100)
 
     else:
-        coverage = ""
+        gene_coverage, prot_coverage = "", ""
 
-    logging.info("Number of genes covered by expression data: %s%s",
-                 num_exp_genes, coverage)
+    logging.info("Number of genes covered by gene expression data: %s%s",
+                 num_gene_exp_genes, gene_coverage)
+    logging.info("Number of genes covered by protein expression data: %s%s",
+                 num_prot_exp_genes, prot_coverage)
 
-    if num_exp_genes:
-        print("Mapping expression information...")
-        gene_num = progressbar.ProgressBar(max_value=num_exp_genes)
+    if num_gene_exp_genes:
+        print("Mapping gene expression information...")
+        gene_num = progressbar.ProgressBar(max_value=num_gene_exp_genes)
         gene_num.update(0)
 
-    for i, gene in enumerate(exp_genes, 1):
-        exp = normalize_distribution(protein_exp[gene])
-        for tissue in sorted(tissues):
+    for i, gene in enumerate(gene_exp_genes, 1):
+        gene_exp[gene] = normalize_distribution(gene_exp[gene])
+        for tissue in gtex_tissues:
             pathway_db_cursor.execute("""
                 INSERT INTO
                     ProteinExpression
@@ -2721,17 +2761,50 @@ def build_expression_tables(
                 """,
                 (gene,
                 tissue,
-                exp[tissue][0],
-                exp[tissue][1],
-                exp[tissue][2]))
+                gene_exp[gene][tissue][0],
+                gene_exp[gene][tissue][1],
+                gene_exp[gene][tissue][2]))
+
+            gene_tsv_writer.writerow([
+                gene,
+                input_gene_name[gene],
+                tissue,
+                gene_exp[gene][tissue][0],
+                gene_exp[gene][tissue][1],
+                gene_exp[gene][tissue][2]])
+
+        pathway_db.commit()
+        gene_num.update(i)
+
+    gene_tsv_file.close()
+
+    if num_gene_exp_genes:
+        print("Mapping protein expression information...")
+        gene_num = progressbar.ProgressBar(max_value=num_prot_exp_genes)
+        gene_num.update(0)
+
+    for i, gene in enumerate(prot_exp_genes, 1):
+        prot_exp[gene] = normalize_distribution(prot_exp[gene])
+        for tissue in hpm_tissues:
+            pathway_db_cursor.execute("""
+                INSERT INTO
+                    ProteinExpression
+                VALUES
+                    (?, ?, ?, ?, ?)
+                """,
+                (gene,
+                tissue,
+                prot_exp[gene][tissue][0],
+                prot_exp[gene][tissue][1],
+                prot_exp[gene][tissue][2]))
 
             prot_tsv_writer.writerow([
                 gene,
                 input_gene_name[gene],
                 tissue,
-                exp[tissue][0],
-                exp[tissue][1],
-                exp[tissue][2]])
+                prot_exp[gene][tissue][0],
+                prot_exp[gene][tissue][1],
+                prot_exp[gene][tissue][2]])
 
         pathway_db.commit()
         gene_num.update(i)
@@ -3105,10 +3178,7 @@ def produce_pathway_summary(
                     gene = ?
                 """, (gene,)):
 
-            exp[gene][tissue] = {
-                    "exp": exp,
-                    "z-score": exp_z,
-                    "p-value": exp_p}
+            exp[gene][tissue] = (exp, exp_z, exp_p)
 
         gene_num.update(i)
 
@@ -3191,9 +3261,7 @@ def produce_pathway_summary(
 
                         if exp[gene]:
                             to_file.extend([
-                                "{:.4f}".format(
-                                 exp[gene][tissue][measure])
-                                 for measure in ("exp", "z-score", "p-value")])
+                                 exp[gene][tissue][i] for i in range(2)])
                         else:
                             to_file.extend(["NA" for i in range(3)])
 
@@ -3222,9 +3290,8 @@ def produce_pathway_summary(
 
                         if exp[up_down_stream_gene]:
                             to_file.extend([
-                                "{:.4f}".format(
-                                exp[up_down_stream_gene][tissue][measure])
-                                for measure in ("exp", "z-score", "p-value")])
+                                exp[up_down_stream_gene][tissue][i]
+                                for i in range(2)])
                         else:
                             to_file.extend(["NA" for i in range(3)])
 

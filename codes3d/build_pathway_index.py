@@ -34,7 +34,7 @@ if __name__ == "__main__":
                                                    "pathway_db_tsv_pw_fp"))
     pathway_db_tsv_gene_exp_fp = os.path.join(os.path.dirname(__file__),
                                          config.get("Defaults",
-                                                 "pathway_db_tsv_prot_exp_fp"))
+                                                 "pathway_db_tsv_gene_exp_fp"))
     pathway_db_tsv_prot_exp_fp = os.path.join(os.path.dirname(__file__),
                                          config.get("Defaults",
                                                  "pathway_db_tsv_prot_exp_fp"))
