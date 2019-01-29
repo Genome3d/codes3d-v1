@@ -2729,7 +2729,7 @@ def build_expression_tables(
             for tissue in sorted(gene_exp[gene]):
                 pathway_db_cursor.execute("""
                     INSERT INTO
-                        ProteinExpression
+                        GeneExpression
                     VALUES
                         (?, ?, ?, ?, ?)
                     """,
@@ -2863,11 +2863,11 @@ def build_pathway_db(
 
     tsv_file = open(pathway_db_tsv_pw_fp, "w", buffering=1)
     tsv_writer = csv.writer(tsv_file, delimiter="\t", lineterminator="\n")
-    tsv_header = ["Gene",
+    tsv_header = ["Gene_A",
                   "Pathway",
                   "Pathway_Version",
                   "Pathway_Name",
-                  "Up_Down_Stream_Gene",
+                  "Gene_B",
                   "Upstream",
                   "Downstream",
                   "Upregulating",
@@ -3156,7 +3156,7 @@ def produce_pathway_summary(
                     exp_z,
                     exp_p,
                 FROM
-                    ProteinExpression
+                    GeneExpression
                 WHERE
                     gene = ?
                 """, (gene,)):
@@ -3193,23 +3193,23 @@ def produce_pathway_summary(
     summary_writer = csv.writer(summary_file, delimiter="\t")
     summary_header = [
         "SNP",
-        "Gene",
+        "Gene_A",
         "Pathway",
         "Pathway_Name",
         "Tissue",
-        "Expression",
-        "Expression_z-Score",
-        "Expression_p-Value",
-        "Up_Down_Stream_Gene",
+        "Gene_A_Expression",
+        "Gene_A_Expression_z-Score",
+        "Gene_A_Expression_p-Value",
+        "Gene_B",
         "Upstream",
         "Downstream",
         "Upregulating",
         "Downregulating",
         "Upregulated",
         "Downregulated",
-        "Up_Down_Stream_Expression",
-        "Up_Down_Stream_Expression_z-Score",
-        "Up_Down_Stream_Expression_p-Value"]
+        "Gene_B_Expression",
+        "Gene_B_Expression_z-Score",
+        "Gene_B_Expression_p-Value"]
     summary_writer.writerow(summary_header)
 
     num_rows = 0
