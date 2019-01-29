@@ -13,10 +13,6 @@ if __name__ == "__main__":
             "-s","--summary_file",required=True,
             help="summary file produced by produce_summary()")
     parser.add_argument(
-            "-o","--output_dir",default="codes3d_pathway_summary",
-            help="The directory in which to output results "+\
-            "(\"codes3d_pathway_summary\" by default).")
-    parser.add_argument(
             "-c","--config",
         default=os.path.join(os.path.dirname(__file__),
                              "../docs/codes3d.conf"),
@@ -36,12 +32,24 @@ if __name__ == "__main__":
     config.read(args.config)
     pathway_db_fp = os.path.join(os.path.dirname(__file__),
                                  config.get("Defaults", "PATHWAY_DB_FP"))
-    if not os.path.isdir(args.output_dir):
-	    os.mkdir(args.output_dir)
+    pathway_db_gene_name_fp = os.path.join(os.path.dirname(__file__),
+                                           config.get("Defaults",
+                                               "PATHWAY_DB_GENE_NAME_FP"))
+    pathway_sum_fp = os.path.join(os.path.dirname(__file__),
+                                  config.get("Defaults",
+                                             "PATHWAY_SUM_FP"))
+    pathway_sum_gene_map_fp = os.path.join(os.path.dirname(__file__),
+                                           config.get("Defaults",
+                                               "PATHWAY_SUM_GENE_MAP_FP"))
+
+    output_dir = os.path.dirname(pathway_sum_fp)
+    if not os.path.isdir(output_dir):
+        os.mkdir(output_dir)
 
     genes = codes3d.parse_summary_file(args.summary_file,
         args.buffer_size)
 
-    codes3d.produce_pathway_summary(genes, pathway_db_fp, args.output_dir,
+    codes3d.produce_pathway_summary(genes, pathway_db_fp,
+        pathway_db_gene_name_fp, pathway_sum_fp, pathway_sum_gene_map_fp,
         args.buffer_size, args.significant_expression)
 

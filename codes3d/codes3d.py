@@ -1073,6 +1073,7 @@ def produce_summary(
     num_processes = min(num_processes, len(current_process.cpu_affinity()))
     pool = multiprocessing.Pool(processes=num_processes)
 
+    snps = genes.keys()
     gene_ids = list(gene_ids)
     tissues = list(GENE_DF)
 
@@ -1094,11 +1095,11 @@ def produce_summary(
     print("\tComputing HiC information for {} snp-gene combinations...".format(
           len(snps) * len(gene_ids)))
     hic_data = pool.map(calc_hic_contacts, ((snp, gene, genes[snp][gene])
-                for snp in genes for gene in gene_ids
-                if gene in genes[snp]))
+                for snp in snps if snp in genes
+                for gene in gene_ids if gene in genes[snp]))
     hic_dict = {snp: {gene: hic_data.pop(0)
                 for gene in gene_ids if gene in genes[snp]}
-                for snp in genes}
+                for snp in snps if snp in genes}
 
     pool.close()
 
@@ -2581,12 +2582,12 @@ def build_expression_tables(
         pathway_db_tsv_prot_exp_fp,
         expression_table_fp,
         pathway_db_gene_map_fp,
+        pathway_db_exp_gene_fp,
         pathway_db_exp_prot_fp,
         genes,
-        num_genes,
         num_processes):
     """"""
-    if num_genes:
+    if len(genes):
         global GENE_DF
         GENE_DF = pandas.read_table(expression_table_fp,
                                     index_col="Description", engine='c',
@@ -2622,13 +2623,12 @@ def build_expression_tables(
 
             for line in gene_map_reader:
                 for gene in line[3].split(";"):
-                    if gene not in genes:
-                        continue
+                    if gene in genes:
 
-                    if gene not in accessions:
-                        accessions[gene] = set()
+                        if gene not in accessions:
+                            accessions[gene] = set()
 
-                    accessions[gene] |= set([accession.split("|")[1]
+                        accessions[gene] |= set([accession.split("|")[1]
                                           for accession in line[2].split(";")])
 
         accession_exp = {}
@@ -2644,13 +2644,29 @@ def build_expression_tables(
                 accession = line[0]
                 accession_exp[accession] = {}
                 for i in hpm_tissues:
-                    accession_exp[accession][hpm_tissues[i]] = float(line[i])
+                    tissue = hpm_tissues[i]
+                    accession_exp[accession][tissue] = float(line[i])
 
         prot_exp = {}
         for gene in accessions:
             prot_exp[gene] = {tissue: sum([accession_exp[accession][tissue]
                               for accession in accessions[gene]])
                               for tissue in accession_exp[accession]}
+
+        with open(pathway_db_exp_gene_fp, "r") as gene_exp_file:
+            gene_exp_reader = csv.reader(gene_exp_file)
+            header = next(gene_exp_reader)
+
+            for line in gene_exp_reader:
+                gene = line[0]
+                if gene in genes:
+                    if gene not in prot_exp:
+                        prot_exp[gene] = {}
+
+                    for i in hpm_tissues:
+                        tissue = hpm_tissues[i]
+                        if not float(line[i]):
+                            prot_exp[gene][tissue] = 0.0
 
     gene_tsv_file = open(pathway_db_tsv_gene_exp_fp, "w", buffering=1)
     prot_tsv_file = open(pathway_db_tsv_prot_exp_fp, "w", buffering=1)
@@ -2702,17 +2718,17 @@ def build_expression_tables(
                 ON CONFLICT IGNORE)
             """)
 
-    if num_genes:
-        order_gene_exp = [gene for gene in genes if gene in gene_exp]
-        order_prot_exp = [gene for gene in genes if gene in prot_exp]
-        len_gene = len(order_gene_exp)
-        len_prot = len(order_prot_exp)
-        gene_coverage = " ({:.2f}%)".format((len_gene/num_genes)*100)
-        prot_coverage = " ({:.2f}%)".format((len_prot/num_genes)*100)
+    order_gene_exp = [gene for gene in genes if gene in gene_exp]
+    order_prot_exp = [gene for gene in genes if gene in prot_exp]
+    len_gene = len(order_gene_exp)
+    len_prot = len(order_prot_exp)
+
+    if len(genes):
+        gene_coverage = " ({:.2f}%)".format((len_gene/len(genes))*100)
+        prot_coverage = " ({:.2f}%)".format((len_prot/len(genes))*100)
 
     else:
         gene_coverage, prot_coverage = "", ""
-        len_gene, len_prot = 0, 0
 
     logging.info("Number of genes covered by gene expression data: %s%s",
                  len_gene, gene_coverage)
@@ -2749,7 +2765,8 @@ def build_expression_tables(
             pathway_db.commit()
             gene_num.update(i)
 
-        gene_tsv_file.close()
+        gene_num.finish()
+    gene_tsv_file.close()
 
     if len_prot:
         print("Mapping protein expression information...")
@@ -2781,6 +2798,7 @@ def build_expression_tables(
             pathway_db.commit()
             gene_num.update(i)
 
+    gene_num.finish()
     prot_tsv_file.close()
 
     return None
@@ -2794,6 +2812,7 @@ def build_pathway_db(
         pathway_db_log_fp,
         expression_table_fp,
         pathway_db_gene_map_fp,
+        pathway_db_exp_gene_fp,
         pathway_db_exp_prot_fp,
         pathway_db_gene_sym_fp,
         pathway_db_gene_syn_fp,
@@ -2832,8 +2851,8 @@ def build_pathway_db(
     gene_syn_writer = csv.writer(gene_syn_tsv, delimiter="\t",
                                  lineterminator="\n")
     gene_syn_header = [
-            "Input_Gene_Synonym",
-            "Gene_Name"]
+        "Input_Gene_Name",
+        "Remapped_Gene_Name"]
     gene_syn_writer.writerow(gene_syn_header)
 
     genes = []
@@ -2945,7 +2964,7 @@ def build_pathway_db(
     all_up_down_stream_genes = set()
 
     if num_genes:
-        print("Collecting pathway information...")
+        print("Querying pathway information...")
         gene_num = progressbar.ProgressBar(max_value=num_genes)
         gene_num.update(0)
 
@@ -3026,6 +3045,7 @@ def build_pathway_db(
         pathway_db.commit()
         gene_num.update(i)
 
+    gene_num.finish()
     tsv_file.close()
 
     if num_genes:
@@ -3047,8 +3067,8 @@ def build_pathway_db(
     build_expression_tables(pathway_db, pathway_db_cursor,
                             pathway_db_tsv_gene_exp_fp,
                             pathway_db_tsv_prot_exp_fp, expression_table_fp,
-                            pathway_db_gene_map_fp, pathway_db_exp_prot_fp,
-                            genes, num_genes, num_processes)
+                            pathway_db_gene_map_fp, pathway_db_exp_gene_fp,
+                            pathway_db_exp_prot_fp, genes, num_processes)
 
     pathway_db.close()
     os.rename(pathway_db_tmp_fp, pathway_db_fp)
@@ -3137,37 +3157,73 @@ def merge_gtex_hpm(expr):
         "Rectum",
         "Retina"]
 
+    unmapped.extend(set([
+        tissue for tissue in tissue_map.values()
+        if tissue not in tissue_map and
+           tissue is not None]))
+
     for gene in expr:
         for tissue in tissue_map:
             if tissue_map[tissue] is None:
                 if tissue in expr[gene]["gene"]:
                     del expr[gene]["gene"][tissue]
 
-            elif expr[gene]["prot"]:
+            elif tissue in expr[gene]["prot"]:
                     expr[gene]["prot"][tissue] =\
                         expr[gene]["prot"][tissue_map[tissue]]
 
         for tissue in unmapped:
-            if expr[gene]["prot"]:
+            if tissue in expr[gene]["prot"]:
                 del expr[gene]["prot"][tissue]
 
 
 
-    return (expr, sorted(tissue_map))
+    return (expr, sorted([tissue for tissue in tissue_map
+                            if tissue_map[tissue] is not None]))
 
 def produce_pathway_summary(
         genes,
         pathway_db_fp,
-        output_dir,
+        pathway_db_gene_name_fp,
+        pathway_sum_fp,
+        pathway_sum_gene_map_fp,
         buffer_size,
         p_value):
+
+    gene_name = GeneName(pathway_db_gene_name_fp)
+    gene_ids = set(itertools.chain.from_iterable(genes.values()))
+    corrected_name = {gene: gene_name.correct(gene)
+                        for gene in gene_ids}
+    to_map_file = sorted([(gene, corrected_name[gene]) for gene in gene_ids
+                          if gene != corrected_name[gene]] and
+                          corrected_name[gene],
+                          key=lambda tup: tup[0])
+
+    map_header = [
+        "Input_Gene_Name",
+        "Remapped_Gene_Name"]
+
+    with open(pathway_sum_gene_map_fp, "w+",
+              buffering=buffer_size) as gene_map_file:
+        gene_map_writer = csv.writer(gene_map_file, delimiter="\t",
+                                     lineterminator="\n")
+
+        gene_map_writer.writerow(map_header)
+        for row in to_map_file:
+            gene_map_writer.writerow(row)
+
+    gene_ids = set()
+    for snp in genes:
+        corrected = set([corrected_name[gene] for gene in genes[snp]
+                         if corrected_name[gene]])
+        genes[snp] = list(corrected)
+        gene_ids |= corrected
 
     pathway_db = sqlite3.connect(pathway_db_fp)
     pathway_db.text_factory = str
     pathway_db_cursor = pathway_db.cursor()
 
     gene_ids = set(itertools.chain.from_iterable(genes.values()))
-
     print("Querying local database for gene-pathway associations...")
     gene_num = progressbar.ProgressBar(max_value=len(gene_ids))
     gene_num.update(0)
@@ -3209,7 +3265,8 @@ def produce_pathway_summary(
 
             up_down_stream_genes |= {upstream_gene, downstream_gene}
 
-            gene_num.update(i)
+        gene_num.update(i)
+    gene_num.finish()
 
     gene_ids |= up_down_stream_genes
     pathway_ids = set(itertools.chain.from_iterable(pathways.values()))
@@ -3231,6 +3288,7 @@ def produce_pathway_summary(
             pathway_name[pathway] = name
 
         pathway_num.update(i)
+    pathway_num.finish()
 
     print("Querying local database for gene expression data...")
     gene_num = progressbar.ProgressBar(max_value=len(gene_ids))
@@ -3255,6 +3313,7 @@ def produce_pathway_summary(
             expr[gene]["gene"][tissue] = (exp, exp_z, exp_p)
 
         gene_num.update(i)
+    gene_num.finish()
 
     print("Querying local database for protein expression data...")
     gene_num = progressbar.ProgressBar(max_value=len(gene_ids))
@@ -3277,27 +3336,28 @@ def produce_pathway_summary(
             expr[gene]["prot"][tissue] = (exp, exp_z, exp_p)
 
         gene_num.update(i)
+    gene_num.finish()
 
     pathway_db.close()
 
     expr, tissues = merge_gtex_hpm(expr)
 
-    summary_file = open(os.path.join(output_dir, "pathway_summary.tsv"), "w",
-                        buffering=buffer_size)
-    summary_writer = csv.writer(summary_file, delimiter="\t")
+    summary_file = open(pathway_sum_fp, "w+", buffering=buffer_size)
+    summary_writer = csv.writer(summary_file, delimiter="\t",
+                                lineterminator="\n")
     summary_header = [
         "SNP",
         "Gene_A",
         "Gene_B",
         "Pathway",
         "Pathway_Name",
-        "Tissue",
         "Upstream",
         "Downstream",
         "Upregulating",
         "Downregulating",
         "Upregulated",
         "Downregulated",
+        "Tissue",
         "Gene_A_Gene_Expression",
         "Gene_A_Gene_Expression_z-Score",
         "Gene_A_Gene_Expression_p-Value",
@@ -3329,7 +3389,9 @@ def produce_pathway_summary(
     current_row = 0
     for snp in sorted(genes):
         for gene in sorted(genes[snp]):
-            for pathway in sorted(pathways[gene]):
+            for pathway in sorted(pathways[gene],
+                    key=lambda pathway: int("".join([char for char in pathway
+                                                     if char.isdigit()]))):
                 up_down_stream_genes = set(itertools.chain.from_iterable(
                     pathways[gene][pathway].values()))
                 for up_down_stream_gene in sorted(up_down_stream_genes):
@@ -3340,7 +3402,6 @@ def produce_pathway_summary(
                             up_down_stream_gene,
                             pathway,
                             pathway_name[pathway],
-                            tissue,
                             up_down_stream_gene in pathways[gene][pathway][
                                 "upstream"],
                             up_down_stream_gene in pathways[gene][pathway][
@@ -3360,12 +3421,13 @@ def produce_pathway_summary(
                             up_down_stream_gene in pathways[gene][pathway][
                                 "downstream"] and
                             pathways[gene][pathway]["downstream"][
-                                up_down_stream_gene][1]]
+                                up_down_stream_gene][1],
+                            tissue]
 
                         if (tissue in expr[gene]["gene"] and
-                            expr[gene]["prot"] and
+                            tissue in expr[gene]["prot"] and
                             tissue in expr[up_down_stream_gene]["gene"] and
-                            expr[up_down_stream_gene]["prot"]):
+                            tissue in expr[up_down_stream_gene]["prot"]):
 
                             to_file.extend([
                                 expr[gene]["gene"][tissue][i]
@@ -3388,6 +3450,7 @@ def produce_pathway_summary(
                         current_row += 1
                         row_num.update(current_row)
 
+    row_num.finish()
     summary_file.close()
 
     return None
