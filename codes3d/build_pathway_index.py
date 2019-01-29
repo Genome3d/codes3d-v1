@@ -53,6 +53,9 @@ if __name__ == "__main__":
     pathway_db_gene_sym_fp = os.path.join(os.path.dirname(__file__),
                                     config.get("Defaults",
                                                "pathway_db_gene_sym_fp"))
+    pathway_db_gene_syn_fp = os.path.join(os.path.dirname(__file__),
+                                    config.get("Defaults",
+                                               "pathway_db_gene_syn_fp"))
     pathway_db_gene_name_fp = os.path.join(os.path.dirname(__file__),
                                     config.get("Defaults",
                                                "pathway_db_gene_name_fp"))
@@ -60,5 +63,6 @@ if __name__ == "__main__":
         pathway_db_tsv_gene_exp_fp, pathway_db_tsv_prot_exp_fp,
         pathway_db_tsv_pw_fp, pathway_db_log_fp,
         expression_table_fp, pathway_db_gene_map_fp, pathway_db_exp_prot_fp,
-        pathway_db_gene_sym_fp, pathway_db_gene_name_fp, num_processes)
+        pathway_db_gene_sym_fp, pathway_db_gene_syn_fp,
+        pathway_db_gene_name_fp, num_processes)
 
