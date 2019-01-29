@@ -3074,6 +3074,87 @@ def parse_summary_file(
 
     return {snp: list(genes[snp]) for snp in genes}
 
+def merge_gtex_hpm(expr):
+    """"""
+    tissue_map = {
+        "Adipose_Subcutaneous": None,
+        "Adipose_Visceral_Omentum": None,
+        "Adrenal_Gland": "Adrenal",
+        "Artery_Aorta": None,
+        "Artery_Coronary": None,
+        "Artery_Tribial": None,
+        "Bladder": "Urinary_Bladder",
+        "Brain_Amygdala": None,
+        "Brain_Anterior_cingulate_cortex_BA24": None,
+        "Brain_Caudate_basal_ganglia": None,
+        "Brain_Cerebellar_Hemisphere": None,
+        "Brain_Cerebellum": None,
+        "Brain_Cortex": None,
+        "Brain_Frontal_Cortex_BA9": "Frontal_Cortex",
+        "Brain_Hippocampus": None,
+        "Brain_Hypothalamus": None,
+        "Brain_Nucleus_accumbens_basal_ganglia": None,
+        "Brain_Putamen_basal_ganglia": None,
+        "Brain_Spinal_cord_cervical_c-1": "Spinal_Cord",
+        "Brain_Substantia_nigra": None,
+        "Breast_Mammary_Tissue": None,
+        "Cells_EBV-transformed_lymphocytes": None,
+        "Cells_Transformed_fibroblasts": None,
+        "Cervix_Ectocervix": None,
+        "Cervix_Endocervix": None,
+        "Colon_Sigmoid": "Colon",
+        "Colon_Transverse": "Colon",
+        "Esophagus_Gastroesophageal_Junction": "Esophagus",
+        "Esophagus_Mucosa": "Esophagus",
+        "Esophagus_Muscularis": "Esophagus",
+        "Fallopian_Tube": None,
+        "Heart_Atrial_Appendage": "Heart",
+        "Heart_Left_Ventricle": "Heart",
+        "Kidney_Cortex": "Kidney",
+        "Liver": "Liver",
+        "Lung": "Lung",
+        "Minor_Salivary_Gland": None,
+        "Muscle_Skeletal": None,
+        "Nerve_Tibial": None,
+        "Ovary": "Ovary",
+        "Pancreas": "Pancreas",
+        "Pituitary": None,
+        "Prostate": "Prostate",
+        "Skin_Not_Sun_Exposed_Suprapubic": None,
+        "Skin_Sun_Exposed_Lower_leg": None,
+        "Small_Intestine_Terminal_Ileum": None,
+        "Spleen": None,
+        "Stomach": None,
+        "Testis": "Testis",
+        "Thyroid": None,
+        "Uterus": None,
+        "Vagina": None,
+        "Whole_Blood": None
+        }
+
+    unmapped = [
+        "Gallbladder",
+        "Rectum",
+        "Retina"]
+
+    for gene in expr:
+        for tissue in tissue_map:
+            if tissue_map[tissue] is None:
+                if tissue in expr[gene]["gene"]:
+                    del expr[gene]["gene"][tissue]
+
+            elif expr[gene]["prot"]:
+                    expr[gene]["prot"][tissue] =\
+                        expr[gene]["prot"][tissue_map[tissue]]
+
+        for tissue in unmapped:
+            if expr[gene]["prot"]:
+                del expr[gene]["prot"][tissue]
+
+
+
+    return (expr, sorted(tissue_map))
+
 def produce_pathway_summary(
         genes,
         pathway_db_fp,
@@ -3085,18 +3166,10 @@ def produce_pathway_summary(
     pathway_db.text_factory = str
     pathway_db_cursor = pathway_db.cursor()
 
-    tissues = sorted([
-        tissue for (tissue,) in pathway_db_cursor.execute("""
-            SELECT DISTINCT
-                tissue
-            FROM
-                expression
-            """)])
-
-    print("Querying local database for gene-pathway associations...")
     gene_ids = set(itertools.chain.from_iterable(genes.values()))
 
-    gene_num = progressbar.ProgressBar(max_value=len(gene_ids)*2)
+    print("Querying local database for gene-pathway associations...")
+    gene_num = progressbar.ProgressBar(max_value=len(gene_ids))
     gene_num.update(0)
 
     up_down_stream_genes = set()
@@ -3114,8 +3187,7 @@ def produce_pathway_summary(
                     UpstreamGenes.downregulating AS downregulating,
                     DownstreamGenes.downstream_gene AS downstream_gene,
                     DownstreamGenes.upregulated AS upregulated,
-                    DownstreamGenes.downregulated AS downregulated,
-
+                    DownstreamGenes.downregulated AS downregulated
                 FROM
                     Pathways
                     NATURAL JOIN UpstreamGenes
@@ -3139,36 +3211,10 @@ def produce_pathway_summary(
 
             gene_num.update(i)
 
-
-    print("Querying local database for expression data...")
     gene_ids |= up_down_stream_genes
-
-    gene_num = progressbar.ProgressBar(max_value=len(gene_ids))
-    gene_num.update(0)
-
-    exp = {}
-    for i, gene in enumerate(gene_ids, 1):
-        exp[gene] = {}
-        for (tissue, exp, exp_z, exp_p) in pathway_db_cursor.execute("""
-                SELECT
-                    tissue,
-                    exp,
-                    exp_z,
-                    exp_p,
-                FROM
-                    GeneExpression
-                WHERE
-                    gene = ?
-                """, (gene,)):
-
-            exp[gene][tissue] = (exp, exp_z, exp_p)
-
-        gene_num.update(i)
-
-
-    print("Querying local database for pathway names...")
     pathway_ids = set(itertools.chain.from_iterable(pathways.values()))
 
+    print("Querying local database for pathway names...")
     pathway_num = progressbar.ProgressBar(max_value=len(pathway_ids))
     pathway_num.update(0)
 
@@ -3181,12 +3227,60 @@ def produce_pathway_summary(
                 PathwayNames
             WHERE
                 pathway = ?
-            """, pathway):
+            """, (pathway,)):
             pathway_name[pathway] = name
 
         pathway_num.update(i)
 
+    print("Querying local database for gene expression data...")
+    gene_num = progressbar.ProgressBar(max_value=len(gene_ids))
+    gene_num.update(0)
+
+    expr = {}
+    for i, gene in enumerate(gene_ids, 1):
+        expr[gene] = {}
+        expr[gene]["gene"] = {}
+        for (tissue, exp, exp_z, exp_p) in pathway_db_cursor.execute("""
+                SELECT
+                    tissue,
+                    exp,
+                    exp_z,
+                    exp_p
+                FROM
+                    GeneExpression
+                WHERE
+                    gene = ?
+                """, (gene,)):
+
+            expr[gene]["gene"][tissue] = (exp, exp_z, exp_p)
+
+        gene_num.update(i)
+
+    print("Querying local database for protein expression data...")
+    gene_num = progressbar.ProgressBar(max_value=len(gene_ids))
+    gene_num.update(0)
+
+    for i, gene in enumerate(gene_ids, 1):
+        expr[gene]["prot"] = {}
+        for (tissue, exp, exp_z, exp_p) in pathway_db_cursor.execute("""
+                SELECT
+                    tissue,
+                    exp,
+                    exp_z,
+                    exp_p
+                FROM
+                    ProteinExpression
+                WHERE
+                    gene = ?
+                """, (gene,)):
+
+            expr[gene]["prot"][tissue] = (exp, exp_z, exp_p)
+
+        gene_num.update(i)
+
     pathway_db.close()
+
+    expr, tissues = merge_gtex_hpm(expr)
 
     summary_file = open(os.path.join(output_dir, "pathway_summary.tsv"), "w",
                         buffering=buffer_size)
@@ -3194,22 +3288,28 @@ def produce_pathway_summary(
     summary_header = [
         "SNP",
         "Gene_A",
+        "Gene_B",
         "Pathway",
         "Pathway_Name",
         "Tissue",
-        "Gene_A_Expression",
-        "Gene_A_Expression_z-Score",
-        "Gene_A_Expression_p-Value",
-        "Gene_B",
         "Upstream",
         "Downstream",
         "Upregulating",
         "Downregulating",
         "Upregulated",
         "Downregulated",
-        "Gene_B_Expression",
-        "Gene_B_Expression_z-Score",
-        "Gene_B_Expression_p-Value"]
+        "Gene_A_Gene_Expression",
+        "Gene_A_Gene_Expression_z-Score",
+        "Gene_A_Gene_Expression_p-Value",
+        "Gene_A_Protein_Expression",
+        "Gene_A_Protein_Expression_z-Score",
+        "Gene_A_Protein_Expression_p-Value",
+        "Gene_B_Gene_Expression",
+        "Gene_B_Gene_Expression_z-Score",
+        "Gene_B_Gene_Expression_p-Value",
+        "Gene_B_Protein_Expression",
+        "Gene_B_Protein_Expression_z-Score",
+        "Gene_B_Protein_Expression_p-Value"]
     summary_writer.writerow(summary_header)
 
     num_rows = 0
@@ -3237,19 +3337,10 @@ def produce_pathway_summary(
                         to_file = [
                             snp,
                             gene,
-                            database,
+                            up_down_stream_gene,
                             pathway,
                             pathway_name[pathway],
-                            tissue]
-
-                        if exp[gene]:
-                            to_file.extend([
-                                 exp[gene][tissue][i] for i in range(2)])
-                        else:
-                            to_file.extend(["NA" for i in range(3)])
-
-                        to_file.extend([
-                            up_down_stream_gene,
+                            tissue,
                             up_down_stream_gene in pathways[gene][pathway][
                                 "upstream"],
                             up_down_stream_gene in pathways[gene][pathway][
@@ -3269,16 +3360,30 @@ def produce_pathway_summary(
                             up_down_stream_gene in pathways[gene][pathway][
                                 "downstream"] and
                             pathways[gene][pathway]["downstream"][
-                                up_down_stream_gene][1]])
+                                up_down_stream_gene][1]]
 
-                        if exp[up_down_stream_gene]:
+                        if (tissue in expr[gene]["gene"] and
+                            expr[gene]["prot"] and
+                            tissue in expr[up_down_stream_gene]["gene"] and
+                            expr[up_down_stream_gene]["prot"]):
+
                             to_file.extend([
-                                exp[up_down_stream_gene][tissue][i]
-                                for i in range(2)])
-                        else:
-                            to_file.extend(["NA" for i in range(3)])
+                                expr[gene]["gene"][tissue][i]
+                                    for i in range(3)])
 
-                        summary_writer.writerow(to_file)
+                            to_file.extend([
+                                expr[gene]["prot"][tissue][i]
+                                    for i in range(3)])
+
+                            to_file.extend([
+                                expr[up_down_stream_gene]["gene"][tissue][i]
+                                    for i in range(3)])
+
+                            to_file.extend([
+                                expr[up_down_stream_gene]["prot"][tissue][i]
+                                    for i in range(3)])
+
+                            summary_writer.writerow(to_file)
 
                         current_row += 1
                         row_num.update(current_row)
