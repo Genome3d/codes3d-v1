@@ -1095,11 +1095,11 @@ def produce_summary(
     print("\tComputing HiC information for {} snp-gene combinations...".format(
           len(snps) * len(gene_ids)))
     hic_data = pool.map(calc_hic_contacts, ((snp, gene, genes[snp][gene])
-                for snp in snps if snp in genes
+                for snp in snps
                 for gene in gene_ids if gene in genes[snp]))
     hic_dict = {snp: {gene: hic_data.pop(0)
                 for gene in gene_ids if gene in genes[snp]}
-                for snp in snps if snp in genes}
+                for snp in snps}
 
     pool.close()
 
@@ -2215,6 +2215,7 @@ class GeneName():
         return gene_name
 
     def correct(self, gene_name):
+        gene_name = gene_name.replace("\n"," ").replace("  ", " ")
         gene_name = gene_name.strip(" ()?*")
         gene_name = gene_name.split("(")[0].strip()
 
@@ -2374,10 +2375,12 @@ def wikipathways(gene,
         if response is None:
             continue
 
+        nsmap = {}
+        nsmap["gpml"] = response.nsmap[None]
+
         homology_mapped_pathway = False
         if exclude_homology_mappings:
-            for comment in response.findall(
-                    "{{{}}}Comment".format(response.nsmap[None])):
+            for comment in response.findall("gpml:Comment", nsmap):
                 if comment.get("Source") == "HomologyMapper":
                     homology = True
                     break
@@ -2386,8 +2389,7 @@ def wikipathways(gene,
             continue
 
         group_to_graph, graph_to_group = {}, {}
-        for group in response.findall("{{{}}}Group".format(
-            response.nsmap[None])):
+        for group in response.findall("gpml:Group", nsmap):
             group_id = group.get("GroupId")
             graph_id = group.get("GraphId")
             if graph_id:
@@ -2397,8 +2399,7 @@ def wikipathways(gene,
         graph_ids = set()
         corrected_name = {}
 
-        for data_node in response.findall("{{{}}}DataNode".format(
-            response.nsmap[None])):
+        for data_node in response.findall("gpml:DataNode", nsmap):
             text_label = data_node.attrib["TextLabel"]
 
             if isinstance(text_label, str):
@@ -2416,11 +2417,9 @@ def wikipathways(gene,
         input_ids = {"non-group": {}, "group": {}}
         output_ids = {"non-group": {}, "group": {}}
 
-        for interaction in response.findall("{{{}}}Interaction".format(
-            response.nsmap[None])):
-            points = interaction.find("{{{}}}Graphics".format(
-                response.nsmap[None])).findall(
-                    "{{{}}}Point".format(response.nsmap[None]))
+        for interaction in response.findall("gpml:Interaction", nsmap):
+            points = interaction.find("gpml:Graphics", nsmap).findall(
+                    "gpml:Point", nsmap)
 
             input_ref = points[0].get("GraphRef")
             output_ref = points[-1].get("GraphRef")
@@ -2445,9 +2444,12 @@ def wikipathways(gene,
             output_ids["non-group"] or
             output_ids["group"]):
 
-            for data_node in response.findall("{{{}}}DataNode".format(
-                response.nsmap[None])):
+            for data_node in response.findall("gpml:DataNode", nsmap):
                 if data_node.get("Type") == "GeneProduct":
+                    xref = data_node.find("gpml:Xref", nsmap)
+                    if not (xref.get("Database") and xref.get("ID")):
+                        continue
+
                     graph_id = data_node.get("GraphId")
                     group_ref = data_node.get("GroupRef")
 
@@ -3102,7 +3104,7 @@ def merge_gtex_hpm(expr):
         "Adrenal_Gland": "Adrenal",
         "Artery_Aorta": None,
         "Artery_Coronary": None,
-        "Artery_Tribial": None,
+        "Artery_Tibial": None,
         "Bladder": "Urinary_Bladder",
         "Brain_Amygdala": None,
         "Brain_Anterior_cingulate_cortex_BA24": None,
@@ -3168,7 +3170,7 @@ def merge_gtex_hpm(expr):
                 if tissue in expr[gene]["gene"]:
                     del expr[gene]["gene"][tissue]
 
-            elif tissue in expr[gene]["prot"]:
+            elif tissue_map[tissue] in expr[gene]["prot"]:
                     expr[gene]["prot"][tissue] =\
                         expr[gene]["prot"][tissue_map[tissue]]
 
@@ -3176,10 +3178,7 @@ def merge_gtex_hpm(expr):
             if tissue in expr[gene]["prot"]:
                 del expr[gene]["prot"][tissue]
 
-
-
-    return (expr, sorted([tissue for tissue in tissue_map
-                            if tissue_map[tissue] is not None]))
+    return expr
 
 def produce_pathway_summary(
         genes,
@@ -3187,8 +3186,7 @@ def produce_pathway_summary(
         pathway_db_gene_name_fp,
         pathway_sum_fp,
         pathway_sum_gene_map_fp,
-        buffer_size,
-        p_value):
+        buffer_size):
 
     gene_name = GeneName(pathway_db_gene_name_fp)
     gene_ids = set(itertools.chain.from_iterable(genes.values()))
@@ -3203,7 +3201,7 @@ def produce_pathway_summary(
         "Input_Gene_Name",
         "Remapped_Gene_Name"]
 
-    with open(pathway_sum_gene_map_fp, "w+",
+    with open(pathway_sum_gene_map_fp, "w",
               buffering=buffer_size) as gene_map_file:
         gene_map_writer = csv.writer(gene_map_file, delimiter="\t",
                                      lineterminator="\n")
@@ -3269,26 +3267,6 @@ def produce_pathway_summary(
     gene_num.finish()
 
     gene_ids |= up_down_stream_genes
-    pathway_ids = set(itertools.chain.from_iterable(pathways.values()))
-
-    print("Querying local database for pathway names...")
-    pathway_num = progressbar.ProgressBar(max_value=len(pathway_ids))
-    pathway_num.update(0)
-
-    pathway_name = {}
-    for i, pathway in enumerate(pathway_ids, 1):
-        for (name,) in pathway_db_cursor.execute("""
-            SELECT
-                name
-            FROM
-                PathwayNames
-            WHERE
-                pathway = ?
-            """, (pathway,)):
-            pathway_name[pathway] = name
-
-        pathway_num.update(i)
-    pathway_num.finish()
 
     print("Querying local database for gene expression data...")
     gene_num = progressbar.ProgressBar(max_value=len(gene_ids))
@@ -3340,17 +3318,16 @@ def produce_pathway_summary(
 
     pathway_db.close()
 
-    expr, tissues = merge_gtex_hpm(expr)
+    expr = merge_gtex_hpm(expr)
 
-    summary_file = open(pathway_sum_fp, "w+", buffering=buffer_size)
+    summary_file = open(pathway_sum_fp, "w", buffering=buffer_size)
     summary_writer = csv.writer(summary_file, delimiter="\t",
                                 lineterminator="\n")
     summary_header = [
         "SNP",
         "Gene_A",
-        "Gene_B",
         "Pathway",
-        "Pathway_Name",
+        "Gene_B",
         "Upstream",
         "Downstream",
         "Upregulating",
@@ -3376,10 +3353,13 @@ def produce_pathway_summary(
     for snp in genes:
         for gene in genes[snp]:
             for pathway in pathways[gene]:
-                num_up_down_stream_genes = len(
-                    set(itertools.chain.from_iterable(
-                            pathways[gene][pathway].values())))
-                num_rows += len(tissues) * num_up_down_stream_genes
+                for up_down_stream_gene in set(itertools.chain.from_iterable(
+                    pathways[gene][pathway].values())):
+                    num_rows += len(set.intersection(
+                        set(expr[gene]["gene"]),
+                        set(expr[gene]["prot"]),
+                        set(expr[up_down_stream_gene]["gene"]),
+                        set(expr[up_down_stream_gene]["prot"])))
 
 
     print("Writing to summary files...")
@@ -3390,18 +3370,22 @@ def produce_pathway_summary(
     for snp in sorted(genes):
         for gene in sorted(genes[snp]):
             for pathway in sorted(pathways[gene],
-                    key=lambda pathway: int("".join([char for char in pathway
-                                                     if char.isdigit()]))):
+                    key=lambda pathway: int(
+                        "".join([char for char in pathway
+                            if char.isdigit()]))):
                 up_down_stream_genes = set(itertools.chain.from_iterable(
                     pathways[gene][pathway].values()))
                 for up_down_stream_gene in sorted(up_down_stream_genes):
-                    for tissue in tissues:
+                    for tissue in sorted(set.intersection(
+                            set(expr[gene]["gene"]),
+                            set(expr[gene]["prot"]),
+                            set(expr[up_down_stream_gene]["gene"]),
+                            set(expr[up_down_stream_gene]["prot"]))):
                         to_file = [
                             snp,
                             gene,
-                            up_down_stream_gene,
                             pathway,
-                            pathway_name[pathway],
+                            up_down_stream_gene,
                             up_down_stream_gene in pathways[gene][pathway][
                                 "upstream"],
                             up_down_stream_gene in pathways[gene][pathway][
@@ -3424,34 +3408,81 @@ def produce_pathway_summary(
                                 up_down_stream_gene][1],
                             tissue]
 
-                        if (tissue in expr[gene]["gene"] and
-                            tissue in expr[gene]["prot"] and
-                            tissue in expr[up_down_stream_gene]["gene"] and
-                            tissue in expr[up_down_stream_gene]["prot"]):
+                        to_file.extend([
+                            expr[gene]["gene"][tissue][i]
+                                for i in range(3)])
 
-                            to_file.extend([
-                                expr[gene]["gene"][tissue][i]
-                                    for i in range(3)])
+                        to_file.extend([
+                            expr[gene]["prot"][tissue][i]
+                                for i in range(3)])
 
-                            to_file.extend([
-                                expr[gene]["prot"][tissue][i]
-                                    for i in range(3)])
+                        to_file.extend([
+                            expr[up_down_stream_gene]["gene"][tissue][i]
+                                for i in range(3)])
 
-                            to_file.extend([
-                                expr[up_down_stream_gene]["gene"][tissue][i]
-                                    for i in range(3)])
+                        to_file.extend([
+                            expr[up_down_stream_gene]["prot"][tissue][i]
+                                for i in range(3)])
 
-                            to_file.extend([
-                                expr[up_down_stream_gene]["prot"][tissue][i]
-                                    for i in range(3)])
-
-                            summary_writer.writerow(to_file)
+                        summary_writer.writerow(to_file)
 
                         current_row += 1
                         row_num.update(current_row)
 
     row_num.finish()
     summary_file.close()
+
+    return None
+
+def plot_pathway_summary(pathway_sum_fp, buffer_size, pathway_plot_fp):
+    """"""
+    snps = {}
+    genes = {}
+    expr = {}
+    with open(pathway_sum_fp, "r", buffering=buffer_size) as summary_file:
+        sum_reader = csv.reader(summary_file, delimiter="\t")
+        next(sum_reader)
+        for row in sum_reader:
+           snp = row[0]
+           gene_a = row[1]
+           gene_b = row[3]
+           upstream = row[4] == "True"
+           downstream = row[5] == "True"
+           upregulating = row[6] == "True"
+           downregulating = row[7] == "True"
+           upregulated = row[8] == "True"
+           downregulated = row[9] == "True"
+           tissue = row[10]
+           gene_a_gene_exp = float(row[12])
+           gene_a_prot_exp = float(row[15])
+           gene_b_gene_exp = float(row[18])
+           gene_b_prot_exp = float(row[21])
+
+           if snp not in snps:
+               snps[snp] = set()
+           snps[snp].add(gene)
+
+           if gene_a not in genes:
+               genes[gene_a] = {}
+           if gene_b not in genes[gene]:
+               genes[gene_a][gene_b] = [
+                   upstream,
+                   downstream,
+                   upregulating,
+                   downregulating,
+                   upregulated,
+                   downregulated]
+           else:
+               genes[gene_a][gene_b] = [
+                   genes[gene_a][gene_b][0] or upstream,
+                   genes[gene_a][gene_b][1] or downstream,
+                   genes[gene_a][gene_b][2] or upregulating,
+                   genes[gene_a][gene_b][3] or downregulating,
+                   genes[gene_a][gene_b][4] or upregulated,
+                   genes[gene_a][gene_b][5] or downregulated]
+
+
+
 
     return None
 
