@@ -40,7 +40,7 @@ import rpy2.robjects as R
 import scipy.stats as st
 import base64
 import re
-import numpy
+import numpy as np
 
 def parse_parameters(restriction_enzymes, include_cell_line, exclude_cell_line):
     """Validate user parameters -r, -n and -x.
@@ -2188,14 +2188,9 @@ def kegg(gene):
 class GeneName():
     """"""
     def __init__(self, pathway_db_gene_name_fp):
-        # Reactome
-        # Phosphorylation
-        # self.mod = re.compile(
-        #        "^p-(A|C|D|E|F|G|H|I|K|L|M|N|P|Q|R|S|T|V|W|X|Y)[0-9]+-")
-
-        # WikiPathways
-        # Integer
         self.integer = re.compile("^[0-9]+$")
+        self.mod = re.compile(
+                "^p-(A|C|D|E|F|G|H|I|K|L|M|N|P|Q|R|S|T|V|W|X|Y)[0-9]+-")
 
         self.synonym = {}
         with open(pathway_db_gene_name_fp) as gene_syn_file:
@@ -2208,12 +2203,6 @@ class GeneName():
                         self.synonym[syn.lower()] = row[0]
                 self.synonym[row[2].lower()] = row[0]
 
-    def reactome(self, gene_name):
-        if self.mod.search(gene_name):
-            gene_name = re.sub(self.mod, "", gene_name)
-
-        return gene_name
-
     def correct(self, gene_name):
         gene_name = gene_name.replace("\n"," ").replace("  ", " ")
         gene_name = gene_name.strip(" ()?*")
@@ -2221,6 +2210,9 @@ class GeneName():
 
         if self.integer.match(gene_name):
             return None
+
+        if self.mod.search(gene_name):
+            gene_name = re.sub(self.mod, "", gene_name)
 
         return self.synonym.get(gene_name.lower(), gene_name)
 
@@ -2286,7 +2278,7 @@ def reactome(gene):
                     name = metabolite["displayName"]
                     name = name.split(" [")[0].split("(")[0]
                     reactions[reaction_id]["input"].add(
-                            gene_name.reactome(name))
+                            gene_name.correct(name))
 
         if "output" in response:
             for metabolite in response["output"]:
@@ -2295,7 +2287,7 @@ def reactome(gene):
                     name = metabolite["displayName"]
                     name = name.split(" [")[0].split("(")[0]
                     reactions[reaction_id]["output"].add(
-                            gene_name.reactome(name))
+                            gene_name.correct(name))
 
     for pathway_id in pathways:
         pathways[pathway_id]["input"] = set()
@@ -2553,9 +2545,9 @@ def get_exp(args):
     except KeyError:
         return None
 
-    if isinstance(exp, numpy.float64):
+    if isinstance(exp, np.float64):
         return exp
-    elif isinstance(exp, numpy.ndarray):
+    elif isinstance(exp, np.ndarray):
         return exp.max()
 
 def normalize_distribution(exp):
@@ -3436,14 +3428,11 @@ def produce_pathway_summary(
 
 def plot_pathway_summary(pathway_sum_fp, buffer_size, pathway_plot_fp):
     """"""
-    snps = {}
-    genes = {}
-    expr = {}
+    genes, expr = {}, {}
     with open(pathway_sum_fp, "r", buffering=buffer_size) as summary_file:
         sum_reader = csv.reader(summary_file, delimiter="\t")
         next(sum_reader)
         for row in sum_reader:
-           snp = row[0]
            gene_a = row[1]
            gene_b = row[3]
            upstream = row[4] == "True"
@@ -3452,19 +3441,16 @@ def plot_pathway_summary(pathway_sum_fp, buffer_size, pathway_plot_fp):
            downregulating = row[7] == "True"
            upregulated = row[8] == "True"
            downregulated = row[9] == "True"
+
            tissue = row[10]
            gene_a_gene_exp = float(row[12])
            gene_a_prot_exp = float(row[15])
            gene_b_gene_exp = float(row[18])
            gene_b_prot_exp = float(row[21])
 
-           if snp not in snps:
-               snps[snp] = set()
-           snps[snp].add(gene)
-
            if gene_a not in genes:
                genes[gene_a] = {}
-           if gene_b not in genes[gene]:
+           if gene_b not in genes[gene_a]:
                genes[gene_a][gene_b] = [
                    upstream,
                    downstream,
@@ -3481,8 +3467,49 @@ def plot_pathway_summary(pathway_sum_fp, buffer_size, pathway_plot_fp):
                    genes[gene_a][gene_b][4] or upregulated,
                    genes[gene_a][gene_b][5] or downregulated]
 
+           for gene in (gene_a, gene_b):
+               if gene not in expr:
+                   expr[gene] = {}
+           if tissue not in expr[gene_a]:
+               expr[gene_a][tissue] = (gene_a_gene_exp, gene_a_prot_exp)
+           if tissue not in expr[gene_b]:
+               expr[gene_b][tissue] = (gene_b_gene_exp, gene_b_prot_exp)
 
+    print("Plotting...")
+    gene_num = progressbar.ProgressBar(max_value=len(genes))
+    gene_num.update(0)
 
+    for i, gene in enumerate(genes, 1):
+        interacting_genes = sorted(list(genes[gene]))
+        tissues = sorted(set.intersection(*[set(expr[gene_b].keys())
+                                            for gene_b in interacting_genes]))
+
+        protein_data = np.array([[expr[gene_b][tissue][1]
+                                  for tissue in tissues]
+                                 for gene_b in interacting_genes])
+        fig, ax = plt.subplots()
+        im = ax.imshow(protein_data, cmap="RdBu")
+
+        ax.set_xticks(np.arange(len(tissues)))
+        ax.set_yticks(np.arange(len(interacting_genes)))
+
+        ax.set_xticklabels([tissue.replace("_", " ") for tissue in tissues])
+        ax.set_yticklabels(interacting_genes)
+
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right",
+                 rotation_mode="anchor")
+
+        cbar = ax.figure.colorbar(im, ax=ax, cmap="RdBu")
+        cbar.ax.set_ylabel("Standardized Expression", rotation=-90,
+                           va="bottom")
+
+        ax.set_title(gene)
+        fig.tight_layout()
+        plt.savefig(os.path.join(pathway_plot_fp, "{}.svg".format(gene)),
+                    format="svg", bbox_inches="tight")
+        plt.close(fig)
+
+        gene_num.update(i)
 
     return None
 
