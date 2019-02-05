@@ -1,0 +1,9 @@
+Gene_A	Pathway	Pathway_Version	Pathway_Name	Gene_B	Upstream	Downstream	Upregulating	Downregulating	Upregulated	Downregulated
+VAMP2	WP481	94171	Insulin Signaling	AKT1	True	False	True	False	False	False
+VAMP2	WP481	94171	Insulin Signaling	AKT2	True	False	True	False	False	False
+VAMP2	WP481	94171	Insulin Signaling	GSK3A	True	False	True	False	False	False
+VAMP2	WP481	94171	Insulin Signaling	GSK3B	True	False	True	False	False	False
+VAMP2	WP481	94171	Insulin Signaling	PDPK1	True	False	True	False	False	False
+VAMP2	WP481	94171	Insulin Signaling	SGK1	True	False	True	False	False	False
+VAMP2	WP481	94171	Insulin Signaling	SGK3	True	False	True	False	False	False
+VAMP2	WP481	94171	Insulin Signaling	SLC2A4	False	True	False	False	True	False
