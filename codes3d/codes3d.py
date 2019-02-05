@@ -1977,14 +1977,16 @@ def request(url):
     try:
         response.raise_for_status()
     except requests.exceptions.HTTPError:
-        logging.error("Unsucessful status code: %s: %s",
-                response.status_code, url)
-
         if response.status_code in (502,):
             response = retry_request(url)
             if response is None:
+                logging.error("Unsucessful status code: %s: %s",
+                               response.status_code, url)
                 return None
+
         else:
+            logging.error("Unsucessful status code: %s: %s",
+                          response.status_code, url)
             return None
 
     content_type = response.headers["Content-Type"].split("; ")[0]
