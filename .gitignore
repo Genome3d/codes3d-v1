@@ -2,6 +2,6 @@
 lib/
 lib
 codes3d_summary/
-codes3d_pathway_summary/
+codes3d_pathway/
 codes3d_output/
 .gitignore
