@@ -3511,9 +3511,13 @@ def plot_heatmaps(db_fp, input_genes, plot_dir):
         for i, gene_a in enumerate(genes, 1):
             interacting_genes = sorted([gene_b for gene_b in genes[gene_a]
                                         if expr.get(gene_b)])
-            tissues = sorted(set.intersection(*[set(expr[gene_b])
-                                for gene_b in interacting_genes
-                                if gene_b in expr]))
+            if interacting_genes:
+                tissues = sorted(set.intersection(*[set(expr[gene_b])
+                                    for gene_b in interacting_genes
+                                    if gene_b in expr]))
+            else:
+                tissues = sorted(expr[gene_a])
+
             gene_gene_data = np.array(
                 [[expr[gene_a][tissue][0]
                 for tissue in tissues]])
@@ -3532,37 +3536,42 @@ def plot_heatmaps(db_fp, input_genes, plot_dir):
                 if genes[gene_a][gene_b][1] and
                    gene_b in expr]
 
-            fig = plt.figure()
+            scale = 0.5
+            fig = plt.figure(figsize=(scale*(len(tissues) + 2),
+                    scale*(2 + 2*(len(upstream_genes)+len(downstream_genes)))))
             gs = gridspec.GridSpec(6, 2,
                      width_ratios=[1, len(tissues)],
                      height_ratios=[len(upstream_genes), 1,
-                         len(downstream_genes), len(upstream_genes), 1,
+                         len(downstream_genes),len(upstream_genes), 1,
                          len(downstream_genes)])
 
-            genes_gene = plt.subplot(gs[3])
-            genes_protein = plt.subplot(gs[9])
+            gs.update(wspace=0.1, hspace=1/(2+2*len(upstream_genes) +
+                                                        len(downstream_genes)))
 
-            expr_plots = [genes_gene,
-                        genes_protein]
+            gene_gene = plt.subplot(gs[3])
+            gene_protein = plt.subplot(gs[9])
+
+            expr_plots = [gene_gene,
+                          gene_protein]
 
             reg_plots = []
 
             plot_data = {
-                    genes_gene: gene_gene_data,
-                    genes_protein: gene_protein_data}
+                    gene_gene: gene_gene_data,
+                    gene_protein: gene_protein_data}
 
             plot_labels = {
-                    genes_gene: [],
-                    genes_protein: []}
+                    gene_gene: [],
+                    gene_protein: []}
 
             if upstream_genes:
-                upstream_genes_gene_data = np.array(
+                upstream_gene_gene_data = np.array(
                     [[expr[gene_b][tissue][0]
                     for tissue in tissues]
                     for gene_b in interacting_genes
                     if genes[gene_a][gene_b][0]])
 
-                upstream_genes_protein_data = np.array(
+                upstream_gene_protein_data = np.array(
                     [[expr[gene_b][tissue][1]
                     for tissue in tissues]
                     for gene_b in interacting_genes
@@ -3575,34 +3584,34 @@ def plot_heatmaps(db_fp, input_genes, plot_dir):
                     for gene_b in interacting_genes
                     if genes[gene_a][gene_b][0]])
 
-                upstream_genes_gene_reg = plt.subplot(gs[0])
-                upstream_genes_gene = plt.subplot(gs[1])
-                upstream_genes_protein_reg = plt.subplot(gs[6])
-                upstream_genes_protein = plt.subplot(gs[7])
+                upstream_gene_gene_reg = plt.subplot(gs[0])
+                upstream_gene_gene = plt.subplot(gs[1])
+                upstream_gene_protein_reg = plt.subplot(gs[6])
+                upstream_gene_protein = plt.subplot(gs[7])
 
                 expr_plots.extend([
-                    upstream_genes_gene,
-                    upstream_genes_protein])
+                    upstream_gene_gene,
+                    upstream_gene_protein])
                 reg_plots.extend([
-                    upstream_genes_gene_reg,
-                    upstream_genes_protein_reg])
+                    upstream_gene_gene_reg,
+                    upstream_gene_protein_reg])
 
-                plot_data[upstream_genes_gene] = upstream_genes_gene_data
-                plot_data[upstream_genes_gene_reg] = upstream_reg_type_data
-                plot_data[upstream_genes_protein] = upstream_genes_protein_data
-                plot_data[upstream_genes_protein_reg] = upstream_reg_type_data
+                plot_data[upstream_gene_gene] = upstream_gene_gene_data
+                plot_data[upstream_gene_gene_reg] = upstream_reg_type_data
+                plot_data[upstream_gene_protein] = upstream_gene_protein_data
+                plot_data[upstream_gene_protein_reg] = upstream_reg_type_data
 
-                plot_labels[upstream_genes_gene_reg] = upstream_genes
-                plot_labels[upstream_genes_protein_reg] = upstream_genes
+                plot_labels[upstream_gene_gene_reg] = upstream_genes
+                plot_labels[upstream_gene_protein_reg] = upstream_genes
 
             if downstream_genes:
-                downstream_genes_gene_data = np.array(
+                downstream_gene_gene_data = np.array(
                     [[expr[gene_b][tissue][0]
                     for tissue in tissues]
                     for gene_b in interacting_genes
                     if genes[gene_a][gene_b][1]])
 
-                downstream_genes_protein_data = np.array(
+                downstream_gene_protein_data = np.array(
                     [[expr[gene_b][tissue][1]
                     for tissue in tissues]
                     for gene_b in interacting_genes
@@ -3615,29 +3624,29 @@ def plot_heatmaps(db_fp, input_genes, plot_dir):
                     for gene_b in interacting_genes
                     if genes[gene_a][gene_b][1]])
 
-                downstream_genes_gene_reg = plt.subplot(gs[4])
-                downstream_genes_gene = plt.subplot(gs[5])
-                downstream_genes_protein_reg = plt.subplot(gs[10])
-                downstream_genes_protein = plt.subplot(gs[11])
+                downstream_gene_gene_reg = plt.subplot(gs[4])
+                downstream_gene_gene = plt.subplot(gs[5])
+                downstream_gene_protein_reg = plt.subplot(gs[10])
+                downstream_gene_protein = plt.subplot(gs[11])
 
                 expr_plots.extend([
-                    downstream_genes_gene,
-                    downstream_genes_protein])
+                    downstream_gene_gene,
+                    downstream_gene_protein])
                 reg_plots.extend([
-                    downstream_genes_gene_reg,
-                    downstream_genes_protein_reg])
+                    downstream_gene_gene_reg,
+                    downstream_gene_protein_reg])
 
-                plot_data[downstream_genes_gene] =\
-                        downstream_genes_gene_data
-                plot_data[downstream_genes_gene_reg] =\
+                plot_data[downstream_gene_gene] =\
+                        downstream_gene_gene_data
+                plot_data[downstream_gene_gene_reg] =\
                         downstream_reg_type_data
-                plot_data[downstream_genes_protein] =\
-                        downstream_genes_protein_data
-                plot_data[downstream_genes_protein_reg] =\
+                plot_data[downstream_gene_protein] =\
+                        downstream_gene_protein_data
+                plot_data[downstream_gene_protein_reg] =\
                         downstream_reg_type_data
 
-                plot_labels[downstream_genes_gene_reg] = downstream_genes
-                plot_labels[downstream_genes_protein_reg] = downstream_genes
+                plot_labels[downstream_gene_gene_reg] = downstream_genes
+                plot_labels[downstream_gene_protein_reg] = downstream_genes
 
             for plot in expr_plots:
                 im = plot.imshow(plot_data[plot], aspect="auto", vmin=-3.0,
@@ -3646,13 +3655,11 @@ def plot_heatmaps(db_fp, input_genes, plot_dir):
                 plot.set_yticks([])
                 plot.set_yticklabels([])
 
-                if plot is not downstream_genes_protein:
-                    plot.set_xticks([])
-                    plot.set_xticklabels([])
+                plot.set_xticks([])
+                plot.set_xticklabels([])
 
-            cbar = fig.colorbar(im, ax=expr_plots)
-            cbar.set_label("Standardized Expression Rate", rotation=-90,
-                    labelpad=15)
+            cbar = fig.colorbar(im, ax=expr_plots,
+                    aspect=2+2*(len(upstream_genes) + len(downstream_genes)))
 
             for plot in reg_plots:
                 im = plot.imshow(plot_data[plot], aspect="auto", vmin=0.0,
@@ -3663,14 +3670,19 @@ def plot_heatmaps(db_fp, input_genes, plot_dir):
                 plot.set_yticks(np.arange(len(plot_labels[plot])))
                 plot.set_yticklabels(plot_labels[plot])
 
-            downstream_genes_protein.set_xticks(np.arange(len(tissues)))
-            downstream_genes_protein.set_xticklabels([
-                tissue.replace("_", " ") for tissue in tissues])
+            if downstream_genes:
+                downstream_gene_protein.set_xticks(np.arange(len(tissues)))
+                downstream_gene_protein.set_xticklabels([
+                    tissue.replace("_", " ") for tissue in tissues])
+                plt.setp(downstream_gene_protein.get_xticklabels(),
+                         rotation=45, ha="right", rotation_mode="anchor")
+            else:
+                gene_protein.set_xticks(np.arange(len(tissues)))
+                gene_protein.set_xticklabels([
+                    tissue.replace("_", " ") for tissue in tissues])
+                plt.setp(gene_protein.get_xticklabels(),
+                         rotation=45, ha="right", rotation_mode="anchor")
 
-            plt.setp(downstream_genes_protein.get_xticklabels(), rotation=45,
-                    ha="right", rotation_mode="anchor")
-
-            fig.suptitle(gene_a)
 
             plt.savefig(os.path.join(plot_dir, "{}.svg".format(gene_a)),
                         format="svg", bbox_inches="tight")
