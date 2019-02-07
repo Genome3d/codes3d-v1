@@ -72,10 +72,15 @@ if __name__ == "__main__":
     out_dir = os.path.join(os.path.dirname(__file__),
         config.get("OUT", "out_dir"))
 
-    for directory in (out_dir, plot_dir):
-        if not os.path.isdir(directory):
-            os.mkdir(directory)
+    if not os.path.isdir(out_dir):
+        os.mkdir(out_dir)
+    if not os.path.isdir(plot_dir):
+        os.mkdir(plot_dir)
+    else:
+        for heatmap in os.listdir(plot_dir):
+            os.remove(os.path.join(plot_dir, heatmap))
 
+    codes3d.print_wikipathways_release()
     input_genes = codes3d.parse_input_genes(args.buffer_size,
                 gene_synonym_map_fp, input_gene_map_fp, args.genes, args.files)
     genes = codes3d.build_pathway_tables(db_fp, log_fp, pathway_tsv_fp,

@@ -2019,10 +2019,8 @@ def request(url):
 
         if re.match(reg, url):
             try:
-                content = lxml.etree.fromstring(response.text)
-                return lxml.etree.fromstring(
-                    base64.b64decode(content.find("ns1:data",
-                        content.nsmap).text))
+                return lxml.etree.fromstring(base64.b64decode(
+                            content.find("ns1:data", content.nsmap).text))
 
             except TypeError, lxml.etree.LxmlSyntaxError:
                 logging.error("Invalid GPML content: %s", url)
@@ -2560,13 +2558,14 @@ def log_reactome_release():
 
     return None
 
-def get_wikipathways_release():
+def print_wikipathways_release():
     """"""
     wikipathways_info_url = "http://data.wikipathways.org/"
     response = request(wikipathways_info_url)
 
     if response is None:
-        return None
+        print("WikiPathways release unavailable.")
+
     else:
         table = response.find("body").find("div").find("table")
         for tr in table.find("tbody").findall("tr"):
@@ -2575,7 +2574,10 @@ def get_wikipathways_release():
             release = tr.find("td").find("a").text
 
         release = "-".join([release[0:4], release[4:6], release[6:8]])
-        return release
+        print("WikiPathways release: {}".format(release))
+
+    return None
+
 
 
 def get_exp(args):
@@ -2747,6 +2749,10 @@ def build_expression_tables(
             gene_exp_reader = csv.reader(gene_exp_file)
             header = next(gene_exp_reader)
 
+            hpm_tissues = {i: header[i].replace("Adult ", "").replace(" ", "_")
+                           for i in range(len(header))
+                           if header[i][:6] == "Adult "}
+
             for line in gene_exp_reader:
                 gene = line[0]
                 if gene in genes:
@@ -2758,14 +2764,14 @@ def build_expression_tables(
                         if float(line[i]) == 0.0:
                             protein_exp[gene][tissue] = 0.0
 
-    exp = merge_gtex_hpm(gene_exp, protein_exp)
+        exp = merge_gtex_hpm(gene_exp, protein_exp)
 
-    if genes:
         gene_coverage = " ({:.2f}%)".format((len(exp["gene"])/len(genes))*100)
         protein_coverage = " ({:.2f}%)".format((len(exp["protein"])/\
                                                     len(genes))*100)
     else:
         gene_coverage, protein_coverage = "", ""
+        exp = {"gene": {}, "protein": {}}
 
     print("Number of genes covered by gene expression data: {}{}".format(
           len(exp["gene"]), gene_coverage))
@@ -2836,7 +2842,7 @@ def build_expression_tables(
             pathway_db.commit()
             gene_num.update(i)
 
-    gene_num.finish()
+        gene_num.finish()
     protein_tsv_file.close()
 
     pathway_db.close()
@@ -2853,6 +2859,9 @@ def parse_input_genes(
     """"""
     global gene_name
     gene_name = GeneName(gene_synonym_map_fp)
+
+    if input_genes is None:
+        input_genes = []
 
     if input_files:
         for input_file in input_files:
@@ -2875,19 +2884,19 @@ def parse_input_genes(
             "Remapped_Gene_Name"]
         gene_map_writer.writerow(gene_map_header)
 
-    genes = []
-    for i in range(len(input_genes)):
-        corrected_name = gene_name.correct(input_genes[i])
+        genes = []
+        for i in range(len(input_genes)):
+            corrected_name = gene_name.correct(input_genes[i])
 
-        if corrected_name:
+            if corrected_name:
 
-            if input_genes[i] != corrected_name:
-                gene_syn_writer.writerow([
-                    input_genes[i],
-                    corrected_name])
+                if input_genes[i] != corrected_name:
+                    gene_map_writer.writerow([
+                        input_genes[i],
+                        corrected_name])
 
-            if corrected_name not in genes:
-                genes.append(corrected_name)
+                if corrected_name not in genes:
+                    genes.append(corrected_name)
 
     if input_genes:
         coverage = " ({:.2f}%)".format((len(genes) / len(input_genes))*100)
@@ -2912,12 +2921,6 @@ def build_pathway_tables(
         level=logging.ERROR,
         format="%(levelname)s\t%(asctime)s\t%(message)s",
         datefmt="%Y-%m-%d %H:%M:%S")
-
-    release = get_wikipathways_release()
-    if release:
-        print("WikiPathways release: {}".format(release))
-    else:
-        print("WikiPathways release unavailable.")
 
     tsv_file = open(pathway_tsv_fp, "w", buffering=1)
     tsv_writer = csv.writer(tsv_file, delimiter="\t", lineterminator="\n")
@@ -3011,84 +3014,84 @@ def build_pathway_tables(
         gene_num = progressbar.ProgressBar(max_value=len(genes))
         gene_num.update(0)
 
-    for i, gene in enumerate(genes, 1):
-        unicode_gene = unicode(gene, "utf-8")
-        pathways = wikipathways(gene)
-        if pathways:
-            num_pathways_available += 1
-        for pathway in pathways:
-            pathway_db_cursor.execute("""
-                INSERT INTO
-                    Pathways
-                VALUES
-                    (?, ?)
-                """, (unicode_gene, pathway[0]))
-
-            pathway_db_cursor.execute("""
-                INSERT INTO
-                    PathwayNames
-                VALUES
-                    (?, ?)
-                """, (pathway[0], pathway[2]))
-
-            entries = [
-                (unicode_gene, pathway[0], upstream_gene,
-                 int(pathway[3][upstream_gene][0]),
-                 int(pathway[3][upstream_gene][1]))
-                for upstream_gene in pathway[3]]
-
-            for entry in entries:
+        for i, gene in enumerate(genes, 1):
+            unicode_gene = unicode(gene, "utf-8")
+            pathways = wikipathways(gene)
+            if pathways:
+                num_pathways_available += 1
+            for pathway in pathways:
                 pathway_db_cursor.execute("""
                     INSERT INTO
-                        UpstreamGenes
+                        Pathways
                     VALUES
-                        (?, ?, ?, ?, ?)
-                    """, entry)
+                        (?, ?)
+                    """, (unicode_gene, pathway[0]))
 
-            entries = [
-                (unicode_gene, pathway[0], downstream_gene,
-                 int(pathway[4][downstream_gene][0]),
-                 int(pathway[4][downstream_gene][1]))
-                for downstream_gene in pathway[4]]
-
-            for entry in entries:
                 pathway_db_cursor.execute("""
                     INSERT INTO
-                        DownstreamGenes
+                        PathwayNames
                     VALUES
-                        (?, ?, ?, ?, ?)
-                    """, entry)
+                        (?, ?)
+                    """, (pathway[0], pathway[2]))
 
-            up_down_stream_genes = set(pathway[3]) | set(pathway[4])
+                entries = [
+                    (unicode_gene, pathway[0], upstream_gene,
+                    int(pathway[3][upstream_gene][0]),
+                    int(pathway[3][upstream_gene][1]))
+                    for upstream_gene in pathway[3]]
 
-            tsv_row = [entry.encode("utf-8") for entry in pathway[:3]]
-            tsv_rows = [
-                   [gene,
-                    tsv_row[0],
-                    tsv_row[1],
-                    tsv_row[2],
-                    up_down_stream_gene.encode("utf-8"),
-                    up_down_stream_gene in pathway[3],
-                    up_down_stream_gene in pathway[4],
-                    (up_down_stream_gene in pathway[3] and
-                        pathway[3][up_down_stream_gene][0]),
-                    (up_down_stream_gene in pathway[3] and
-                        pathway[3][up_down_stream_gene][1]),
-                    (up_down_stream_gene in pathway[4] and
-                        pathway[4][up_down_stream_gene][0]),
-                    (up_down_stream_gene in pathway[4] and
-                        pathway[4][up_down_stream_gene][1])]
-                    for up_down_stream_gene in sorted(up_down_stream_genes)]
+                for entry in entries:
+                    pathway_db_cursor.execute("""
+                        INSERT INTO
+                            UpstreamGenes
+                        VALUES
+                            (?, ?, ?, ?, ?)
+                        """, entry)
 
-            for tsv_row in tsv_rows:
-                tsv_writer.writerow(tsv_row)
+                entries = [
+                    (unicode_gene, pathway[0], downstream_gene,
+                    int(pathway[4][downstream_gene][0]),
+                    int(pathway[4][downstream_gene][1]))
+                    for downstream_gene in pathway[4]]
 
-            all_up_down_stream_genes |= up_down_stream_genes
+                for entry in entries:
+                    pathway_db_cursor.execute("""
+                        INSERT INTO
+                            DownstreamGenes
+                        VALUES
+                            (?, ?, ?, ?, ?)
+                        """, entry)
 
-        pathway_db.commit()
-        gene_num.update(i)
+                up_down_stream_genes = set(pathway[3]) | set(pathway[4])
 
-    gene_num.finish()
+                tsv_row = [entry.encode("utf-8") for entry in pathway[:3]]
+                tsv_rows = [
+                    [gene,
+                        tsv_row[0],
+                        tsv_row[1],
+                        tsv_row[2],
+                        up_down_stream_gene.encode("utf-8"),
+                        up_down_stream_gene in pathway[3],
+                        up_down_stream_gene in pathway[4],
+                        (up_down_stream_gene in pathway[3] and
+                            pathway[3][up_down_stream_gene][0]),
+                        (up_down_stream_gene in pathway[3] and
+                            pathway[3][up_down_stream_gene][1]),
+                        (up_down_stream_gene in pathway[4] and
+                            pathway[4][up_down_stream_gene][0]),
+                        (up_down_stream_gene in pathway[4] and
+                            pathway[4][up_down_stream_gene][1])]
+                        for up_down_stream_gene in sorted(up_down_stream_genes)]
+
+                for tsv_row in tsv_rows:
+                    tsv_writer.writerow(tsv_row)
+
+                all_up_down_stream_genes |= up_down_stream_genes
+
+            pathway_db.commit()
+            gene_num.update(i)
+
+        gene_num.finish()
     logging.shutdown()
     tsv_file.close()
 
@@ -3180,7 +3183,7 @@ def merge_gtex_hpm(gene_exp, protein_exp):
     exp = {"gene": {},
            "protein": {}}
 
-    for gene in set(gene_exp.keys()) | set(protein_exp.keys()):
+    for gene in gene_exp:
         for tissue in tissue_map:
             if tissue_map[tissue] is not None:
                 if tissue in gene_exp[gene]:
@@ -3188,6 +3191,9 @@ def merge_gtex_hpm(gene_exp, protein_exp):
                         exp["gene"][gene] = {}
                     exp["gene"][gene][tissue] = gene_exp[gene][tissue]
 
+    for gene in protein_exp:
+        for tissue in tissue_map:
+            if tissue_map[tissue] is not None:
                 if tissue_map[tissue] in protein_exp[gene]:
                     if gene not in exp["protein"]:
                         exp["protein"][gene] = {}
@@ -3215,25 +3221,18 @@ def produce_pathway_summary(
     genes = set(input_genes)
     for i, gene in enumerate(input_genes, 1):
         pathways[gene] = {}
-        for (pathway, upstream_gene, upregulating, downregulating,
-            downstream_gene, upregulated, downregulated
-            ) in pathway_db_cursor.execute("""
-                SELECT DISTINCT
-                    Pathways.pathway AS pathway,
-                    UpstreamGenes.upstream_gene AS upstream_gene,
-                    UpstreamGenes.upregulating AS upregulating,
-                    UpstreamGenes.downregulating AS downregulating,
-                    DownstreamGenes.downstream_gene AS downstream_gene,
-                    DownstreamGenes.upregulated AS upregulated,
-                    DownstreamGenes.downregulated AS downregulated
-                FROM
-                    Pathways
-                    NATURAL JOIN UpstreamGenes
-                    NATURAL JOIN DownstreamGenes
-                WHERE
-                    gene = ?
-                """, (gene,)):
-
+        for (pathway, upstream_gene, upregulating,
+             downregulating) in pathway_db_cursor.execute("""
+                    SELECT
+                        pathway,
+                        upstream_gene,
+                        upregulating,
+                        downregulating
+                    FROM
+                        UpstreamGenes
+                    WHERE
+                        gene = ?
+                    """, (gene,)):
             if pathway not in pathways[gene]:
                 pathways[gene][pathway] = {
                     "upstream": {},
@@ -3241,11 +3240,28 @@ def produce_pathway_summary(
             pathways[gene][pathway]["upstream"][upstream_gene] = [
                     bool(upregulating),
                     bool(downregulating)]
+            genes.add(upstream_gene)
+
+        for (pathway, downstream_gene, upregulated,
+             downregulated) in pathway_db_cursor.execute("""
+                    SELECT
+                        pathway,
+                        downstream_gene,
+                        upregulated,
+                        downregulated
+                    FROM
+                        DownstreamGenes
+                    WHERE
+                        gene = ?
+                    """, (gene,)):
+            if pathway not in pathways[gene]:
+                pathways[gene][pathway] = {
+                    "upstream": {},
+                    "downstream": {}}
             pathways[gene][pathway]["downstream"][downstream_gene] = [
                     bool(upregulated),
                     bool(downregulated)]
-
-            genes |= {upstream_gene, downstream_gene}
+            genes.add(downstream_gene)
 
         gene_num.update(i)
     gene_num.finish()
@@ -3256,11 +3272,9 @@ def produce_pathway_summary(
     gene_num.update(0)
 
     tissues = set()
-    exp = {"gene": {},
-           "protein": {}}
+    exp = {}
     for i, gene in enumerate(genes, 1):
-        exp["gene"][gene] = {}
-        exp["protein"][gene] = {}
+        exp[gene] = {}
         for (tissue, gene_exp, gene_exp_z, gene_exp_p, protein_exp,
              protein_exp_z, protein_exp_p) in pathway_db_cursor.execute("""
                 SELECT
@@ -3277,11 +3291,10 @@ def produce_pathway_summary(
                 WHERE
                     gene = ?
                 """, (gene,)):
-
             tissues.add(tissue)
-            exp["gene"][gene][tissue] = (gene_exp, gene_exp_z, gene_exp_p)
-            exp["protein"][gene][tissue] = (protein_exp, protein_exp_z,
-                                            protein_exp_p)
+            exp[gene][tissue] = [
+                    (gene_exp, gene_exp_z, gene_exp_p),
+                    (protein_exp, protein_exp_z, protein_exp_p)]
 
         gene_num.update(i)
     gene_num.finish()
@@ -3324,79 +3337,75 @@ def produce_pathway_summary(
             for up_down_stream_gene in set(itertools.chain.from_iterable(
                 pathways[gene][pathway].values())):
                     for tissue in tissues:
-                        if (tissue in exp["gene"][gene] and
-                            tissue in exp["gene"][up_down_stream_gene] and
-                            tissue in exp["protein"][gene] and
-                            tissue in exp["protein"][up_down_stream_gene]):
+                        if (tissue in exp[gene] and
+                            tissue in exp[up_down_stream_gene]):
                             num_rows += 1
+    if num_rows:
+        print("Writing summary file...")
+        row_num = progressbar.ProgressBar(max_value=num_rows)
+        row_num.update(0)
 
-    print("Writing summary file...")
-    row_num = progressbar.ProgressBar(max_value=num_rows)
-    row_num.update(0)
+        current_row = 0
+        for gene in input_genes:
+            for pathway in sorted(pathways[gene],
+                    key=lambda pathway: int(
+                        "".join([char for char in pathway
+                            if char.isdigit()]))):
+                up_down_stream_genes = set(itertools.chain.from_iterable(
+                    pathways[gene][pathway].values()))
+                for up_down_stream_gene in sorted(up_down_stream_genes):
+                    for tissue in tissues:
+                        to_file = [
+                            gene,
+                            pathway,
+                            up_down_stream_gene,
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "upstream"],
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "downstream"],
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "upstream"] and
+                            pathways[gene][pathway]["upstream"][
+                                up_down_stream_gene][0],
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "upstream"] and
+                            pathways[gene][pathway]["upstream"][
+                                up_down_stream_gene][1],
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "downstream"] and
+                            pathways[gene][pathway]["downstream"][
+                                up_down_stream_gene][0],
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "downstream"] and
+                            pathways[gene][pathway]["downstream"][
+                                up_down_stream_gene][1],
+                            tissue]
 
-    current_row = 0
-    for gene in input_genes:
-        for pathway in sorted(pathways[gene],
-                key=lambda pathway: int(
-                    "".join([char for char in pathway
-                        if char.isdigit()]))):
-            up_down_stream_genes = set(itertools.chain.from_iterable(
-                pathways[gene][pathway].values()))
-            for up_down_stream_gene in sorted(up_down_stream_genes):
-                for tissue in tissues:
-                    to_file = [
-                        gene,
-                        pathway,
-                        up_down_stream_gene,
-                        up_down_stream_gene in pathways[gene][pathway][
-                            "upstream"],
-                        up_down_stream_gene in pathways[gene][pathway][
-                            "downstream"],
-                        up_down_stream_gene in pathways[gene][pathway][
-                            "upstream"] and
-                        pathways[gene][pathway]["upstream"][
-                            up_down_stream_gene][0],
-                        up_down_stream_gene in pathways[gene][pathway][
-                            "upstream"] and
-                        pathways[gene][pathway]["upstream"][
-                            up_down_stream_gene][1],
-                        up_down_stream_gene in pathways[gene][pathway][
-                            "downstream"] and
-                        pathways[gene][pathway]["downstream"][
-                            up_down_stream_gene][0],
-                        up_down_stream_gene in pathways[gene][pathway][
-                            "downstream"] and
-                        pathways[gene][pathway]["downstream"][
-                            up_down_stream_gene][1],
-                        tissue]
+                        if (tissue in exp[gene] and
+                            tissue in exp[up_down_stream_gene]):
 
-                    if (tissue in exp["gene"][gene] and
-                            tissue in exp["gene"][up_down_stream_gene] and
-                            tissue in exp["protein"][gene] and
-                            tissue in exp["protein"][up_down_stream_gene]):
+                            to_file.extend([
+                                exp[gene][tissue][0][i]
+                                    for i in range(3)])
 
-                        to_file.extend([
-                            exp["gene"][gene][tissue][i]
-                                for i in range(3)])
+                            to_file.extend([
+                                exp[gene][tissue][1][i]
+                                    for i in range(3)])
 
-                        to_file.extend([
-                            exp["protein"][gene][tissue][i]
-                                for i in range(3)])
+                            to_file.extend([
+                                exp[up_down_stream_gene][tissue][0][i]
+                                    for i in range(3)])
 
-                        to_file.extend([
-                            exp["gene"][up_down_stream_gene][tissue][i]
-                                for i in range(3)])
+                            to_file.extend([
+                                exp[up_down_stream_gene][tissue][1][i]
+                                    for i in range(3)])
 
-                        to_file.extend([
-                            exp["protein"][up_down_stream_gene][tissue][i]
-                                for i in range(3)])
+                            summary_writer.writerow(to_file)
 
-                        summary_writer.writerow(to_file)
+                            current_row += 1
+                            row_num.update(current_row)
 
-                    current_row += 1
-                    row_num.update(current_row)
-
-    row_num.finish()
+        row_num.finish()
     summary_file.close()
 
     return None
@@ -3404,6 +3413,7 @@ def produce_pathway_summary(
 def plot_heatmaps(db_fp, input_genes, plot_dir):
     """"""
     pathway_db = sqlite3.connect(db_fp)
+    pathway_db.text_factory = str
     pathway_db_cursor = pathway_db.cursor()
 
     print("Querying database for gene interactions...")
@@ -3414,18 +3424,14 @@ def plot_heatmaps(db_fp, input_genes, plot_dir):
     all_genes = set(input_genes)
     for i, gene in enumerate(input_genes, 1):
         genes[gene] = {}
-        for (upstream_gene, upregulating, downregulating, downstream_gene,
-            upregulated, downregulated) in pathway_db_cursor.execute("""
-                    SELECT DISTINCT
-                        UpstreamGenes.upstream_gene AS upstream_gene,
-                        UpstreamGenes.upregulating AS upregulating,
-                        UpstreamGenes.downregulating AS downregulating,
-                        DownstreamGenes.downstream_gene AS downstream_gene,
-                        DownstreamGenes.upregulated AS upregulated,
-                        DownstreamGenes.downregulated AS downregulated
+        for (upstream_gene, upregulating,
+             downregulating) in pathway_db_cursor.execute("""
+                    SELECT
+                        upstream_gene,
+                        upregulating,
+                        downregulating
                     FROM
                         UpstreamGenes
-                        NATURAL JOIN DownstreamGenes
                     WHERE
                         gene = ?
                     """, (gene,)):
@@ -3441,7 +3447,19 @@ def plot_heatmaps(db_fp, input_genes, plot_dir):
                 genes[gene][upstream_gene][0] = True
                 genes[gene][upstream_gene][2] = bool(upregulating)
                 genes[gene][upstream_gene][3] = bool(downregulating)
+            all_genes.add(upstream_gene)
 
+        for (downstream_gene, upregulated,
+             downregulated) in pathway_db_cursor.execute("""
+                    SELECT
+                        downstream_gene,
+                        upregulated,
+                        downregulated
+                    FROM
+                        DownstreamGenes
+                    WHERE
+                        gene = ?
+                    """, (gene,)):
             if downstream_gene not in genes[gene]:
                 genes[gene][downstream_gene] = [
                         False,
@@ -3451,11 +3469,10 @@ def plot_heatmaps(db_fp, input_genes, plot_dir):
                         bool(upregulated),
                         bool(downregulated)]
             else:
-                genes[gene][upstream_gene][1] = True
-                genes[gene][upstream_gene][4] = bool(upregulated)
-                genes[gene][upstream_gene][5] = bool(downregulated)
-
-            all_genes |= {upstream_gene, downstream_gene}
+                genes[gene][downstream_gene][1] = True
+                genes[gene][downstream_gene][4] = bool(upregulated)
+                genes[gene][downstream_gene][5] = bool(downregulated)
+            all_genes.add(downstream_gene)
 
         gene_num.update(i)
     gene_num.finish()
@@ -3484,183 +3501,183 @@ def plot_heatmaps(db_fp, input_genes, plot_dir):
         gene_num.update(i)
     gene_num.finish()
 
-    print("Plotting gene expression heatmaps...")
-    gene_num = progressbar.ProgressBar(max_value=len(input_genes))
-    gene_num.update(0)
+    pathway_db.close()
 
-    for i, gene_a in enumerate(input_genes, 1):
-        interacting_genes = sorted(list(genes[gene_a]))
-        tissues = sorted(set.intersection(*[set(expr[gene_b].keys())
-                                            for gene_b in interacting_genes]))
-        gene_gene_data = np.array(
-            [[expr[gene_a][tissue][0]
-            for tissue in tissues]])
+    if genes:
+        print("Plotting gene expression heatmaps...")
+        gene_num = progressbar.ProgressBar(max_value=len(genes))
+        gene_num.update(0)
 
-        gene_protein_data = np.array(
-            [[expr[gene_a][tissue][1]
-            for tissue in tissues]])
+        for i, gene_a in enumerate(genes, 1):
+            interacting_genes = sorted([gene_b for gene_b in genes[gene_a]
+                                        if expr.get(gene_b)])
+            tissues = sorted(set.intersection(*[set(expr[gene_b])
+                                for gene_b in interacting_genes
+                                if gene_b in expr]))
+            gene_gene_data = np.array(
+                [[expr[gene_a][tissue][0]
+                for tissue in tissues]])
 
-        upstream_genes = [
-            gene_b for gene_b in interacting_genes
-            if genes[gene_a][gene_b][0]]
+            gene_protein_data = np.array(
+                [[expr[gene_a][tissue][1]
+                for tissue in tissues]])
 
-        downstream_genes = [
-            gene_b for gene_b in interacting_genes
-            if genes[gene_a][gene_b][1]]
+            upstream_genes = [
+                gene_b for gene_b in interacting_genes
+                if genes[gene_a][gene_b][0] and
+                   gene_b in expr]
 
-        scale = 0.4
-        fig = plt.figure(figsize=(scale*(len(tissues)+1),
-                         scale*(2+2*(len(upstream_genes) +\
-                                     len(downstream_genes)))))
-        gs = gridspec.GridSpec(7, 2,
-                width_ratios=[
-                    1,
-                    len(tissues)+1],
-                height_ratios=[
-                    len(upstream_genes),
-                    1,
-                    len(downstream_genes),
-                    1,
-                    len(upstream_genes),
-                    1,
-                    len(downstream_genes)])
-        gs.update(wspace=0.05)
+            downstream_genes = [
+                gene_b for gene_b in interacting_genes
+                if genes[gene_a][gene_b][1] and
+                   gene_b in expr]
 
-        genes_gene = plt.subplot(gs[3])
-        genes_protein = plt.subplot(gs[11])
+            fig = plt.figure()
+            gs = gridspec.GridSpec(6, 2,
+                     width_ratios=[1, len(tissues)],
+                     height_ratios=[len(upstream_genes), 1,
+                         len(downstream_genes), len(upstream_genes), 1,
+                         len(downstream_genes)])
 
-        expr_plots = [genes_gene,
-                      genes_protein]
+            genes_gene = plt.subplot(gs[3])
+            genes_protein = plt.subplot(gs[9])
 
-        reg_plots = []
+            expr_plots = [genes_gene,
+                        genes_protein]
 
-        plot_data = {
-                genes_gene: gene_gene_data,
-                genes_protein: gene_protein_data}
+            reg_plots = []
 
-        plot_labels = {
-                genes_gene: [],
-                genes_protein: []}
+            plot_data = {
+                    genes_gene: gene_gene_data,
+                    genes_protein: gene_protein_data}
 
-        if upstream_genes:
-            upstream_genes_gene_data = np.array(
-                [[expr[gene_b][tissue][0]
-                for tissue in tissues]
-                for gene_b in interacting_genes
-                if genes[gene_a][gene_b][0]])
+            plot_labels = {
+                    genes_gene: [],
+                    genes_protein: []}
 
-            upstream_genes_protein_data = np.array(
-                [[expr[gene_b][tissue][1]
-                for tissue in tissues]
-                for gene_b in interacting_genes
-                if genes[gene_a][gene_b][0]])
+            if upstream_genes:
+                upstream_genes_gene_data = np.array(
+                    [[expr[gene_b][tissue][0]
+                    for tissue in tissues]
+                    for gene_b in interacting_genes
+                    if genes[gene_a][gene_b][0]])
 
-            upstream_reg_type_data = np.array(
-                [[float(genes[gene_a][gene_b][2])
-                if genes[gene_a][gene_b][2] != genes[gene_a][gene_b][3]
-                else 0.5]
-                for gene_b in interacting_genes
-                if genes[gene_a][gene_b][0]])
+                upstream_genes_protein_data = np.array(
+                    [[expr[gene_b][tissue][1]
+                    for tissue in tissues]
+                    for gene_b in interacting_genes
+                    if genes[gene_a][gene_b][0]])
 
-            upstream_genes_gene_reg = plt.subplot(gs[0])
-            upstream_genes_gene = plt.subplot(gs[1])
-            upstream_genes_protein_reg = plt.subplot(gs[8])
-            upstream_genes_protein = plt.subplot(gs[9])
+                upstream_reg_type_data = np.array(
+                    [[float(genes[gene_a][gene_b][2])
+                    if genes[gene_a][gene_b][2] != genes[gene_a][gene_b][3]
+                    else 0.5]
+                    for gene_b in interacting_genes
+                    if genes[gene_a][gene_b][0]])
 
-            expr_plots.extend([
-                upstream_genes_gene,
-                upstream_genes_protein])
-            reg_plots.extend([
-                upstream_genes_gene_reg,
-                 upstream_genes_protein_reg])
+                upstream_genes_gene_reg = plt.subplot(gs[0])
+                upstream_genes_gene = plt.subplot(gs[1])
+                upstream_genes_protein_reg = plt.subplot(gs[6])
+                upstream_genes_protein = plt.subplot(gs[7])
 
-            plot_data[upstream_genes_gene] = upstream_genes_gene_data
-            plot_data[upstream_genes_gene_reg] = upstream_reg_type_data
-            plot_data[upstream_genes_protein] = upstream_genes_protein_data
-            plot_data[upstream_genes_protein_reg] = upstream_reg_type_data
+                expr_plots.extend([
+                    upstream_genes_gene,
+                    upstream_genes_protein])
+                reg_plots.extend([
+                    upstream_genes_gene_reg,
+                    upstream_genes_protein_reg])
 
-            plot_labels[upstream_genes_gene_reg] = upstream_genes
-            plot_labels[upstream_genes_protein_reg] = upstream_genes
+                plot_data[upstream_genes_gene] = upstream_genes_gene_data
+                plot_data[upstream_genes_gene_reg] = upstream_reg_type_data
+                plot_data[upstream_genes_protein] = upstream_genes_protein_data
+                plot_data[upstream_genes_protein_reg] = upstream_reg_type_data
 
-        if downstream_genes:
-            downstream_genes_gene_data = np.array(
-                [[expr[gene_b][tissue][0]
-                for tissue in tissues]
-                for gene_b in interacting_genes
-                if genes[gene_a][gene_b][1]])
+                plot_labels[upstream_genes_gene_reg] = upstream_genes
+                plot_labels[upstream_genes_protein_reg] = upstream_genes
 
-            downstream_genes_protein_data = np.array(
-                [[expr[gene_b][tissue][1]
-                for tissue in tissues]
-                for gene_b in interacting_genes
-                if genes[gene_a][gene_b][1]])
+            if downstream_genes:
+                downstream_genes_gene_data = np.array(
+                    [[expr[gene_b][tissue][0]
+                    for tissue in tissues]
+                    for gene_b in interacting_genes
+                    if genes[gene_a][gene_b][1]])
 
-            downstream_reg_type_data = np.array(
-                [[float(genes[gene_a][gene_b][4])
-                if genes[gene_a][gene_b][4] != genes[gene_a][gene_b][5]
-                else 0.5]
-                for gene_b in interacting_genes
-                if genes[gene_a][gene_b][1]])
+                downstream_genes_protein_data = np.array(
+                    [[expr[gene_b][tissue][1]
+                    for tissue in tissues]
+                    for gene_b in interacting_genes
+                    if genes[gene_a][gene_b][1]])
 
-            downstream_genes_gene_reg = plt.subplot(gs[4])
-            downstream_genes_gene = plt.subplot(gs[5])
-            downstream_genes_protein_reg = plt.subplot(gs[12])
-            downstream_genes_protein = plt.subplot(gs[13])
+                downstream_reg_type_data = np.array(
+                    [[float(genes[gene_a][gene_b][4])
+                    if genes[gene_a][gene_b][4] != genes[gene_a][gene_b][5]
+                    else 0.5]
+                    for gene_b in interacting_genes
+                    if genes[gene_a][gene_b][1]])
 
-            expr_plots.extend([
-                downstream_genes_gene,
-                downstream_genes_protein])
-            reg_plots.extend([
-                 downstream_genes_gene_reg,
-                 downstream_genes_protein_reg])
+                downstream_genes_gene_reg = plt.subplot(gs[4])
+                downstream_genes_gene = plt.subplot(gs[5])
+                downstream_genes_protein_reg = plt.subplot(gs[10])
+                downstream_genes_protein = plt.subplot(gs[11])
 
-            plot_data[downstream_genes_gene] = downstream_genes_gene_data
-            plot_data[downstream_genes_gene_reg] = downstream_reg_type_data
-            plot_data[downstream_genes_protein] = downstream_genes_protein_data
-            plot_data[downstream_genes_protein_reg] = downstream_reg_type_data
+                expr_plots.extend([
+                    downstream_genes_gene,
+                    downstream_genes_protein])
+                reg_plots.extend([
+                    downstream_genes_gene_reg,
+                    downstream_genes_protein_reg])
 
-            plot_labels[downstream_genes_gene_reg] = downstream_genes
-            plot_labels[downstream_genes_protein_reg] = downstream_genes
+                plot_data[downstream_genes_gene] =\
+                        downstream_genes_gene_data
+                plot_data[downstream_genes_gene_reg] =\
+                        downstream_reg_type_data
+                plot_data[downstream_genes_protein] =\
+                        downstream_genes_protein_data
+                plot_data[downstream_genes_protein_reg] =\
+                        downstream_reg_type_data
 
-        for plot in expr_plots:
-            im = plot.imshow(plot_data[plot], aspect="equal", vmin=-3.0,
-                             vmax=3.0, cmap="RdBu_r")
+                plot_labels[downstream_genes_gene_reg] = downstream_genes
+                plot_labels[downstream_genes_protein_reg] = downstream_genes
 
-            plot.set_yticks([])
-            plot.set_yticklabels([])
+            for plot in expr_plots:
+                im = plot.imshow(plot_data[plot], aspect="auto", vmin=-3.0,
+                                vmax=3.0, cmap="RdBu_r")
 
-            if plot is not downstream_genes_protein:
+                plot.set_yticks([])
+                plot.set_yticklabels([])
+
+                if plot is not downstream_genes_protein:
+                    plot.set_xticks([])
+                    plot.set_xticklabels([])
+
+            cbar = fig.colorbar(im, ax=expr_plots)
+            cbar.set_label("Standardized Expression Rate", rotation=-90,
+                    labelpad=15)
+
+            for plot in reg_plots:
+                im = plot.imshow(plot_data[plot], aspect="auto", vmin=0.0,
+                                 vmax=1.0, cmap="RdYlGn")
+
                 plot.set_xticks([])
                 plot.set_xticklabels([])
+                plot.set_yticks(np.arange(len(plot_labels[plot])))
+                plot.set_yticklabels(plot_labels[plot])
 
-        cbar = fig.colorbar(im, ax=expr_plots)
-        cbar.set_label("Standardized Expression", rotation=-90)
+            downstream_genes_protein.set_xticks(np.arange(len(tissues)))
+            downstream_genes_protein.set_xticklabels([
+                tissue.replace("_", " ") for tissue in tissues])
 
-        for plot in reg_plots:
-            im = plot.imshow(plot_data[plot], aspect="equal", vmin=0.0,
-                             vmax=1.0, cmap="RdYlGn")
+            plt.setp(downstream_genes_protein.get_xticklabels(), rotation=45,
+                    ha="right", rotation_mode="anchor")
 
-            plot.set_xticks([])
-            plot.set_xticklabels([])
-            plot.set_yticks(np.arange(len(plot_labels[plot])))
-            plot.set_yticklabels(plot_labels[plot])
+            fig.suptitle(gene_a)
 
-        downstream_genes_protein.set_xticks(np.arange(len(tissues)))
-        downstream_genes_protein.set_xticklabels([
-            tissue.replace("_", " ") for tissue in tissues])
+            plt.savefig(os.path.join(plot_dir, "{}.svg".format(gene_a)),
+                        format="svg", bbox_inches="tight")
+            plt.close(fig)
 
-        plt.setp(downstream_genes_protein.get_xticklabels(), rotation=45,
-                 ha="right", rotation_mode="anchor")
-
-        fig.suptitle(gene_a)
-        upstream_genes_gene.set_title("Gene Expression")
-        upstream_genes_protein.set_title("Protein Expression")
-
-        plt.savefig(os.path.join(plot_dir, "{}.svg".format(gene_a)),
-                    format="svg", bbox_inches="tight", pad_inches=0.5)
-        plt.close(fig)
-
-        gene_num.update(i)
+            gene_num.update(i)
+        gene_num.finish()
 
     return None
 
