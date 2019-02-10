@@ -22,6 +22,8 @@ if __name__ == "__main__":
         default=(psutil.cpu_count() // 2),
         help="The maximum number of processes (default: {}).".format(
         str((psutil.cpu_count() // 2))))
+    parser.add_argument("-p", "--pvalue", type=float, default=0.05,
+        help="p-value defining the range of the heatmap gradient")
 
     args = parser.parse_args()
 
@@ -69,28 +71,35 @@ if __name__ == "__main__":
     plot_dir = os.path.join(os.path.dirname(__file__),
         config.get("OUT", "plot_dir"))
 
+    plot_dir_z = os.path.join(os.path.dirname(__file__),
+        config.get("OUT", "plot_dir_z"))
+
+    plot_dir_p = os.path.join(os.path.dirname(__file__),
+        config.get("OUT", "plot_dir_p"))
+
     out_dir = os.path.join(os.path.dirname(__file__),
         config.get("OUT", "out_dir"))
 
     if not os.path.isdir(out_dir):
         os.mkdir(out_dir)
-    if not os.path.isdir(plot_dir):
-        os.mkdir(plot_dir)
-    else:
-        for heatmap in os.listdir(plot_dir):
-            os.remove(os.path.join(plot_dir, heatmap))
+    for pl_dir in (plot_dir, plot_dir_z, plot_dir_p):
+        if not os.path.isdir(pl_dir):
+            os.mkdir(pl_dir)
+        elif pl_dir is not plot_dir:
+            for heatmap in os.listdir(pl_dir):
+                os.remove(os.path.join(pl_dir, heatmap))
 
-    codes3d.print_wikipathways_release()
     input_genes = codes3d.parse_input_genes(args.buffer_size,
                 gene_synonym_map_fp, input_gene_map_fp, args.genes, args.files)
-    genes = codes3d.build_pathway_tables(db_fp, log_fp, pathway_tsv_fp,
+    codes3d.build_pathway_tables(db_fp, log_fp, pathway_tsv_fp,
             input_genes)
     codes3d.build_expression_tables(args.num_processes, gtex_gene_exp_fp,
         hpm_map_fp, hpm_gene_exp_fp, hpm_protein_exp_fp, db_fp,
-        gene_exp_tsv_fp, protein_exp_tsv_fp, genes)
+        gene_exp_tsv_fp, protein_exp_tsv_fp, input_genes)
     codes3d.produce_pathway_summary(args.buffer_size, db_fp, summary_fp,
         input_genes)
-    codes3d.plot_heatmaps(db_fp, input_genes, plot_dir)
+    codes3d.plot_heatmaps(db_fp, input_genes, plot_dir_z, plot_dir_p,
+                          args.pvalue)
 
 
 
