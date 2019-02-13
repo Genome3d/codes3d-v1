@@ -2500,32 +2500,39 @@ def wikipathways(gene,
                                 pathway["input"][name] = [True, False]
                             elif input_ids["non-group"][graph_id] == "TBar":
                                 pathway["input"][name] = [False, True]
+                            else:
+                                pathway["input"][name] = [False, False]
 
                         if group_ref in input_ids["group"]:
                             if input_ids["group"][group_ref] == "Arrow":
                                 pathway["input"][name] = [True, False]
                             elif input_ids["group"][group_ref] == "TBar":
                                 pathway["input"][name] = [False, True]
+                            else:
+                                pathway["input"][name] = [False, False]
 
                         if graph_id in output_ids["non-group"]:
                             if output_ids["non-group"][graph_id] == "Arrow":
                                 pathway["output"][name] = [True, False]
                             elif output_ids["non-group"][graph_id] == "TBar":
                                 pathway["output"][name] = [False, True]
+                            else:
+                                pathway["output"][name] = [False, False]
 
                         if group_ref in output_ids["group"]:
                             if output_ids["group"][group_ref] == "Arrow":
                                 pathway["output"][name] = [True, False]
                             elif output_ids["group"][group_ref] == "TBar":
                                 pathway["output"][name] = [False, True]
+                            else:
+                                pathway["output"][name] = [False, False]
 
     pathways = [[unicode(pathway["id"], "utf-8"),
                  unicode(pathway["revision"], "utf-8"),
                  unicode(pathway["name"], "utf-8"),
                  pathway["input"],
                  pathway["output"]]
-                 for pathway in pathways
-                 if pathway["input"] or pathway["output"]]
+                 for pathway in pathways]
 
     return sorted(pathways, key=lambda pathway: pathway[0])
 
@@ -3089,8 +3096,18 @@ def build_pathway_tables(
                 up_down_stream_genes = set(pathway[3]) | set(pathway[4])
 
                 tsv_row = [entry.encode("utf-8") for entry in pathway[:3]]
-                tsv_rows = [
-                    [gene,
+
+                if not up_down_stream_genes:
+                    tsv_rows = [[
+                        gene,
+                        tsv_row[0],
+                        tsv_row[1],
+                        tsv_row[2]]]
+                    tsv_rows[0].extend(["NA" for j in range(7)])
+
+                else:
+                    tsv_rows = [
+                        [gene,
                         tsv_row[0],
                         tsv_row[1],
                         tsv_row[2],
@@ -3105,7 +3122,8 @@ def build_pathway_tables(
                             pathway[4][up_down_stream_gene][0]),
                         (up_down_stream_gene in pathway[4] and
                             pathway[4][up_down_stream_gene][1])]
-                        for up_down_stream_gene in sorted(up_down_stream_genes)]
+                        for up_down_stream_gene
+                            in sorted(up_down_stream_genes)]
 
                 for tsv_row in tsv_rows:
                     tsv_writer.writerow(tsv_row)
@@ -3291,9 +3309,12 @@ def produce_pathway_summary(
                     ProteinExpression.protein_exp_p AS protein_exp_p
                 FROM
                     GeneExpression
-                    NATURAL JOIN ProteinExpression
+                    LEFT OUTER JOIN ProteinExpression
+                ON
+                    GeneExpression.gene = ProteinExpression.gene AND
+                    GeneExpression.tissue = ProteinExpression.tissue
                 WHERE
-                    gene = ?
+                    GeneExpression.gene = ?
                 """, (gene,)):
             tissues.add(tissue)
             exp[gene][tissue] = [
@@ -3334,12 +3355,14 @@ def produce_pathway_summary(
 
     num_rows = 0
     for gene in input_genes:
+        if not pathways[gene]:
+            for tissue in tissues:
+                num_rows += 1
         for pathway in pathways[gene]:
-            for up_down_stream_gene in set(itertools.chain.from_iterable(
-                pathways[gene][pathway].values())):
+            up_down_stream_genes = set(itertools.chain.from_iterable(
+                pathways[gene][pathway].values()))
+            for up_down_stream_gene in up_down_stream_genes:
                     for tissue in tissues:
-                        if (tissue in exp[gene] and
-                            tissue in exp[up_down_stream_gene]):
                             num_rows += 1
     if num_rows:
         print("Writing summary file...")
@@ -3348,12 +3371,37 @@ def produce_pathway_summary(
 
         current_row = 0
         for gene in input_genes:
+            if not pathways[gene]:
+                for tissue in tissues:
+                    to_file = [
+                        gene]
+                    to_file.extend(["NA" for i in range(12)])
+                    to_file.append(tissue)
+
+                    to_file.extend([
+                        exp[gene][tissue][0][i]
+                        if exp[gene] and exp[gene][tissue][0][i] else "NA"
+                            for i in range(3)])
+
+                    to_file.extend([
+                        exp[gene][tissue][1][i]
+                        if exp[gene] and exp[gene][tissue][1][i] else "NA"
+                            for i in range(3)])
+
+                    to_file.extend(["NA" for i in range(6)])
+
+                    summary_writer.writerow(to_file)
+
+                    current_row += 1
+                    row_num.update(current_row)
+
             for pathway in sorted(pathways[gene],
                     key=lambda pathway: int(
                         "".join([char for char in pathway
                             if char.isdigit()]))):
                 up_down_stream_genes = set(itertools.chain.from_iterable(
                     pathways[gene][pathway].values()))
+
                 for up_down_stream_gene in sorted(up_down_stream_genes):
                     for tissue in tissues:
                         to_file = [
@@ -3382,29 +3430,32 @@ def produce_pathway_summary(
                                 up_down_stream_gene][1],
                             tissue]
 
-                        if (tissue in exp[gene] and
-                            tissue in exp[up_down_stream_gene]):
+                        to_file.extend([
+                            exp[gene][tissue][0][i]
+                            if exp[gene] and exp[gene][tissue][0][i] else "NA"
+                                for i in range(3)])
 
-                            to_file.extend([
-                                exp[gene][tissue][0][i]
-                                    for i in range(3)])
+                        to_file.extend([
+                            exp[gene][tissue][1][i]
+                            if exp[gene] and exp[gene][tissue][1][i] else "NA"
+                                for i in range(3)])
 
-                            to_file.extend([
-                                exp[gene][tissue][1][i]
-                                    for i in range(3)])
+                        to_file.extend([
+                            exp[up_down_stream_gene][tissue][0][i]
+                            if (exp[up_down_stream_gene] and
+                            exp[up_down_stream_gene][tissue][0][i]) else "NA"
+                                for i in range(3)])
 
-                            to_file.extend([
-                                exp[up_down_stream_gene][tissue][0][i]
-                                    for i in range(3)])
+                        to_file.extend([
+                            exp[up_down_stream_gene][tissue][1][i]
+                            if (exp[up_down_stream_gene] and
+                            exp[up_down_stream_gene][tissue][1][i]) else "NA"
+                                for i in range(3)])
 
-                            to_file.extend([
-                                exp[up_down_stream_gene][tissue][1][i]
-                                    for i in range(3)])
+                        summary_writer.writerow(to_file)
 
-                            summary_writer.writerow(to_file)
-
-                            current_row += 1
-                            row_num.update(current_row)
+                        current_row += 1
+                        row_num.update(current_row)
 
         row_num.finish()
         print()
@@ -3412,7 +3463,13 @@ def produce_pathway_summary(
 
     return None
 
-def plot_heatmaps(db_fp, input_genes, plot_dir_z, plot_dir_p, p_value):
+def plot_heatmaps(
+        db_fp,
+        input_genes,
+        plot_dir_z,
+        plot_dir_p,
+        p_value,
+        numbers):
     """"""
     pathway_db = sqlite3.connect(db_fp)
     pathway_db.text_factory = str
@@ -3485,13 +3542,23 @@ def plot_heatmaps(db_fp, input_genes, plot_dir_z, plot_dir_p, p_value):
                     ProteinExpression.protein_exp_p AS protein_exp_p
                 FROM
                     GeneExpression
-                    NATURAL JOIN ProteinExpression
+                    LEFT OUTER JOIN ProteinExpression
+                ON
+                    GeneExpression.gene = ProteinExpression.gene AND
+                    GeneExpression.tissue = ProteinExpression.tissue
                 WHERE
-                    gene = ?
+                    GeneExpression.gene = ?
                 """, (gene,)):
 
             expr[gene][tissue] = ((gene_exp_z, protein_exp_z),
                                   (gene_exp_p, protein_exp_p))
+
+    tissues = sorted([tissue for (tissue,) in pathway_db_cursor.execute("""
+                SELECT DISTINCT
+                    tissue
+                FROM
+                    GeneExpression
+                """)])
 
     pathway_db.close()
 
@@ -3503,20 +3570,11 @@ def plot_heatmaps(db_fp, input_genes, plot_dir_z, plot_dir_p, p_value):
         gene_num.update(0)
 
         for i, gene_a in enumerate(genes, 1):
-            interacting_genes = sorted([gene_b for gene_b in genes[gene_a]
-                                        if expr.get(gene_b)])
-            if interacting_genes:
-                tissues = sorted(set(expr[gene_a]) | set.intersection(*[
-                                 set(expr[gene_b])
-                                 for gene_b in interacting_genes
-                                 if gene_b in expr]))
-            else:
-                tissues = sorted(expr[gene_a])
+            interacting_genes = sorted([gene_b for gene_b in genes[gene_a]])
 
             upstream_genes = [
                 gene_b for gene_b in interacting_genes
-                if genes[gene_a][gene_b][0] and
-                gene_b in expr]
+                if genes[gene_a][gene_b][0]]
 
             if upstream_genes:
                 upstream_reg_type_data = np.array(
@@ -3528,8 +3586,7 @@ def plot_heatmaps(db_fp, input_genes, plot_dir_z, plot_dir_p, p_value):
 
             downstream_genes = [
                 gene_b for gene_b in interacting_genes
-                if genes[gene_a][gene_b][1] and
-                gene_b in expr]
+                if genes[gene_a][gene_b][1]]
 
             if downstream_genes:
                 downstream_reg_type_data = np.array(
@@ -3544,18 +3601,23 @@ def plot_heatmaps(db_fp, input_genes, plot_dir_z, plot_dir_p, p_value):
                 (0, st.norm.ppf(0.5*p_value), -st.norm.ppf(0.5*p_value),
                  "RdBu_r", plot_dir_z),
                 (1, p_value, 0.5, "Reds_r", plot_dir_p)):
+
                 gene_gene_data = np.array(
                     [[expr[gene_a][tissue][j][0]
+                      if (expr[gene_a] and
+                          expr[gene_a][tissue][j][0] is not None)
+                      else np.nan
                     for tissue in tissues]])
 
                 gene_protein_data = np.array(
                     [[expr[gene_a][tissue][j][1]
+                      if (expr[gene_a] and
+                          expr[gene_a][tissue][j][1] is not None)
+                      else np.nan
                     for tissue in tissues]])
 
-                scale = 0.5
-                fig = plt.figure(figsize=(scale*(len(tissues) + 2),
-                        scale*(2 + 2*(
-                            len(upstream_genes)+len(downstream_genes)))))
+                fig = plt.figure(figsize=(len(tissues)+2,
+                        2+2*(len(upstream_genes)+len(downstream_genes))))
                 gs = gridspec.GridSpec(2, 1, hspace=1/(1+len(upstream_genes) +
                                        len(downstream_genes)))
 
@@ -3595,12 +3657,18 @@ def plot_heatmaps(db_fp, input_genes, plot_dir_z, plot_dir_p, p_value):
                 if upstream_genes:
                     upstream_gene_gene_data = np.array(
                         [[expr[gene_b][tissue][j][0]
+                          if (expr[gene_b] and
+                              expr[gene_b][tissue][j][0] is not None)
+                          else np.nan
                         for tissue in tissues]
                         for gene_b in interacting_genes
                         if genes[gene_a][gene_b][0]])
 
                     upstream_gene_protein_data = np.array(
                         [[expr[gene_b][tissue][j][1]
+                          if (expr[gene_b] and
+                              expr[gene_b][tissue][j][1] is not None)
+                          else np.nan
                         for tissue in tissues]
                         for gene_b in interacting_genes
                         if genes[gene_a][gene_b][0]])
@@ -3630,12 +3698,18 @@ def plot_heatmaps(db_fp, input_genes, plot_dir_z, plot_dir_p, p_value):
                 if downstream_genes:
                     downstream_gene_gene_data = np.array(
                         [[expr[gene_b][tissue][j][0]
+                          if (expr[gene_b] and
+                              expr[gene_b][tissue][j][0] is not None)
+                          else np.nan
                         for tissue in tissues]
                         for gene_b in interacting_genes
                         if genes[gene_a][gene_b][1]])
 
                     downstream_gene_protein_data = np.array(
                         [[expr[gene_b][tissue][j][1]
+                          if (expr[gene_b] and
+                              expr[gene_b][tissue][j][1] is not None)
+                          else np.nan
                         for tissue in tissues]
                         for gene_b in interacting_genes
                         if genes[gene_a][gene_b][1]])
@@ -3666,7 +3740,7 @@ def plot_heatmaps(db_fp, input_genes, plot_dir_z, plot_dir_p, p_value):
 
                 for plot in expr_plots:
                     im = plot.imshow(plot_data[plot], aspect="auto",
-                            vmin=rmin, vmax=rmax, cmap=cmap)
+                                    vmin=rmin, vmax=rmax, cmap=cmap)
 
                     plot.set_yticks([])
                     plot.set_yticklabels([])
@@ -3674,18 +3748,25 @@ def plot_heatmaps(db_fp, input_genes, plot_dir_z, plot_dir_p, p_value):
                     plot.set_xticks([])
                     plot.set_xticklabels([])
 
+                    if numbers:
+                        for j in range(np.ma.size(plot_data[plot], 0)):
+                            for k in range(len(tissues)):
+                                text = plot.text(k, j,
+                                    "{:.2f}".format(plot_data[plot][j, k]),
+                                    ha="center", va="center", color="black")
+
                 cbar = fig.colorbar(im, ax=expr_plots,
                         aspect=2+2*(
                             len(upstream_genes) + len(downstream_genes)))
 
                 tick_locator = matplotlib.ticker.MaxNLocator(nbins=min(7,
-                          2+2*(len(upstream_genes) + len(downstream_genes))))
+                          3+2*(len(upstream_genes) + len(downstream_genes))))
                 cbar.locator = tick_locator
                 cbar.update_ticks()
 
                 for plot in reg_plots:
                     im = plot.imshow(plot_data[plot], aspect="auto", vmin=0.0,
-                                    vmax=1.0, cmap="RdYlGn")
+                                    vmax=1.0, cmap="binary")
 
                     plot.set_xticks([])
                     plot.set_xticklabels([])

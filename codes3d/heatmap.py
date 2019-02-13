@@ -22,6 +22,8 @@ if __name__ == "__main__":
         default=(psutil.cpu_count() // 2),
         help="The maximum number of processes (default: {}).".format(
         str((psutil.cpu_count() // 2))))
+    parser.add_argument("-n", "--numbers", action="store_true", default=False,
+        help="Label the heatmap entries with the represented value.")
     parser.add_argument("-p", "--pvalue", type=float, default=0.05,
         help="p-value defining the range of the heatmap gradient")
 
@@ -99,7 +101,7 @@ if __name__ == "__main__":
     codes3d.produce_pathway_summary(args.buffer_size, db_fp, summary_fp,
         input_genes)
     codes3d.plot_heatmaps(db_fp, input_genes, plot_dir_z, plot_dir_p,
-                          args.pvalue)
+                          args.pvalue, args.numbers)
 
 
 
