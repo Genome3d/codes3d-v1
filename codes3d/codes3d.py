@@ -39,6 +39,7 @@ from matplotlib.ticker import FuncFormatter
 import matplotlib.gridspec as gridspec
 import rpy2.robjects as R
 import scipy.stats as st
+import scipy.cluster as cl
 import base64
 import re
 import numpy as np
@@ -2228,8 +2229,6 @@ class GeneName():
     """"""
     def __init__(self, pathway_db_gene_name_fp):
         self.integer = re.compile("^[0-9]+$")
-        self.phosphorylation = re.compile(
-                "^p-(A|C|D|E|F|G|H|I|K|L|M|N|P|Q|R|S|T|V|W|X|Y)[0-9]+-")
 
         self.synonym = {}
         with open(pathway_db_gene_name_fp) as gene_syn_file:
@@ -2244,14 +2243,11 @@ class GeneName():
 
     def correct(self, gene_name):
         gene_name = gene_name.replace("\n"," ").replace("  ", " ")
-        gene_name = gene_name.strip(" ()?*")
+        gene_name = gene_name.strip("\"'()?*")
         gene_name = gene_name.split("(")[0].strip()
 
         if self.integer.match(gene_name):
             return None
-
-        if self.phosphorylation.search(gene_name):
-            gene_name = re.sub(self.phosphorylation, "", gene_name)
 
         return self.synonym.get(gene_name.lower(), gene_name)
 
@@ -3463,6 +3459,44 @@ def produce_pathway_summary(
 
     return None
 
+def cluster_genes(tissues, genes, expr, position):
+    if len(genes) < 2:
+        return genes
+
+    no_expression = []
+    no_data = []
+    j = 0
+    for i in range(len(genes)):
+        if not any(expr[genes[i-j]].values()):
+            if None in expr[genes[i-j]].values():
+                no_data.append(genes.pop(i-j))
+            else:
+                no_expression.append(genes.pop(i-j))
+            j += 1
+
+    if position:
+        no_data.extend(no_expression)
+        exclude = no_data
+    else:
+        no_expression.extend(no_data)
+        exclude = no_expression
+
+    distr = {gene: np.array([expr[gene][tissue] for tissue in tissues])
+             for gene in genes}
+    dist_mat = np.nan_to_num(np.array([[abs(st.spearmanr(
+                             distr[genes[i]], distr[genes[j]])[0])
+                      if j < i else np.nan
+                      for j in range(len(genes))] for i in range(len(genes))]))
+    link_mat = cl.hierarchy.linkage(dist_mat, "ward")
+
+    genes = [genes[i] for i in cl.hierarchy.leaves_list(link_mat)]
+    if position:
+        exclude.extend(genes)
+        return exclude
+    else:
+        genes.extend(exclude)
+        return genes
+
 def plot_heatmaps(
         db_fp,
         input_genes,
@@ -3562,8 +3596,6 @@ def plot_heatmaps(
 
     pathway_db.close()
 
-    genes = {gene: genes[gene] for gene in genes if expr[gene]}
-
     if genes:
         print("Building gene expression heatmaps...")
         gene_num = progressbar.ProgressBar(max_value=len(genes))
@@ -3576,31 +3608,70 @@ def plot_heatmaps(
                 gene_b for gene_b in interacting_genes
                 if genes[gene_a][gene_b][0]]
 
+
             if upstream_genes:
+                upstream_expr_gene = {gene: {tissue: expr[gene][tissue][0][0]
+                                            if expr[gene] else None
+                                            for tissue in tissues}
+                                        for gene in upstream_genes}
+                upstream_expr_protein = {gene: {tissue: expr[gene][tissue][0][1]
+                                            if expr[gene] else None
+                                            for tissue in tissues}
+                                        for gene in upstream_genes}
+
+                upstream_genes_gene = cluster_genes(tissues, upstream_genes,
+                                            upstream_expr_gene,
+                                            True)
+
+                upstream_genes_protein = cluster_genes(tissues, upstream_genes,
+                                            upstream_expr_protein,
+                                            True)
+
                 upstream_reg_type_data = np.array(
                     [[float(genes[gene_a][gene_b][2])
                     if genes[gene_a][gene_b][2] != genes[gene_a][gene_b][3]
                     else 0.5]
-                    for gene_b in interacting_genes
-                    if genes[gene_a][gene_b][0]])
+                    for gene_b in upstream_genes_gene])
 
             downstream_genes = [
                 gene_b for gene_b in interacting_genes
                 if genes[gene_a][gene_b][1]]
 
             if downstream_genes:
+                downstream_expr_gene = {gene:
+                                            {tissue: expr[gene][tissue][0][0]
+                                            if expr[gene] else None
+                                            for tissue in tissues}
+                                        for gene in downstream_genes}
+                downstream_expr_protein = {gene:
+                                            {tissue: expr[gene][tissue][0][1]
+                                            if expr[gene] else None
+                                            for tissue in tissues}
+                                        for gene in downstream_genes}
+
+                downstream_genes_gene = cluster_genes(tissues,
+                                                      downstream_genes,
+                                                      downstream_expr_gene,
+                                                      False)
+
+                downstream_genes_protein = cluster_genes(tissues,
+                                                         downstream_genes,
+                                                    downstream_expr_protein,
+                                                    False)
+
                 downstream_reg_type_data = np.array(
                     [[float(genes[gene_a][gene_b][4])
                     if genes[gene_a][gene_b][4] != genes[gene_a][gene_b][5]
                     else 0.5]
-                    for gene_b in interacting_genes
-                    if genes[gene_a][gene_b][1]])
+                    for gene_b in downstream_genes])
 
 
             for (j, rmin, rmax, cmap, plot_dir) in (
                 (0, st.norm.ppf(0.5*p_value), -st.norm.ppf(0.5*p_value),
                  "RdBu_r", plot_dir_z),
                 (1, p_value, 0.5, "Reds_r", plot_dir_p)):
+
+                gene_reg_type_data = np.array([[0.5]])
 
                 gene_gene_data = np.array(
                     [[expr[gene_a][tissue][j][0]
@@ -3637,21 +3708,27 @@ def plot_heatmaps(
                             hspace=1/(2+2*(len(upstream_genes) +
                                 len(downstream_genes))))
 
-
+                gene_gene_reg = plt.subplot(gs1[2])
                 gene_gene = plt.subplot(gs1[3])
+                gene_protein_reg = plt.subplot(gs2[2])
                 gene_protein = plt.subplot(gs2[3])
 
                 expr_plots = [gene_gene,
                               gene_protein]
 
-                reg_plots = []
+                reg_plots = [gene_gene_reg,
+                             gene_protein_reg]
 
                 plot_data = {
+                        gene_gene_reg: gene_reg_type_data,
                         gene_gene: gene_gene_data,
+                        gene_protein_reg: gene_reg_type_data,
                         gene_protein: gene_protein_data}
 
                 plot_labels = {
+                        gene_gene_reg: [gene_a],
                         gene_gene: [],
+                        gene_protein_reg: [gene_a],
                         gene_protein: []}
 
                 if upstream_genes:
@@ -3661,8 +3738,7 @@ def plot_heatmaps(
                               expr[gene_b][tissue][j][0] is not None)
                           else np.nan
                         for tissue in tissues]
-                        for gene_b in interacting_genes
-                        if genes[gene_a][gene_b][0]])
+                        for gene_b in upstream_genes_gene])
 
                     upstream_gene_protein_data = np.array(
                         [[expr[gene_b][tissue][j][1]
@@ -3670,8 +3746,7 @@ def plot_heatmaps(
                               expr[gene_b][tissue][j][1] is not None)
                           else np.nan
                         for tissue in tissues]
-                        for gene_b in interacting_genes
-                        if genes[gene_a][gene_b][0]])
+                        for gene_b in upstream_genes_protein])
 
                     upstream_gene_gene_reg = plt.subplot(gs1[0])
                     upstream_gene_gene = plt.subplot(gs1[1])
@@ -3692,8 +3767,9 @@ def plot_heatmaps(
                     plot_data[upstream_gene_protein_reg] =\
                             upstream_reg_type_data
 
-                    plot_labels[upstream_gene_gene_reg] = upstream_genes
-                    plot_labels[upstream_gene_protein_reg] = upstream_genes
+                    plot_labels[upstream_gene_gene_reg] = upstream_genes_gene
+                    plot_labels[upstream_gene_protein_reg] =\
+                            upstream_genes_protein
 
                 if downstream_genes:
                     downstream_gene_gene_data = np.array(
@@ -3702,8 +3778,7 @@ def plot_heatmaps(
                               expr[gene_b][tissue][j][0] is not None)
                           else np.nan
                         for tissue in tissues]
-                        for gene_b in interacting_genes
-                        if genes[gene_a][gene_b][1]])
+                        for gene_b in downstream_genes_gene])
 
                     downstream_gene_protein_data = np.array(
                         [[expr[gene_b][tissue][j][1]
@@ -3711,8 +3786,7 @@ def plot_heatmaps(
                               expr[gene_b][tissue][j][1] is not None)
                           else np.nan
                         for tissue in tissues]
-                        for gene_b in interacting_genes
-                        if genes[gene_a][gene_b][1]])
+                        for gene_b in downstream_genes_protein])
 
                     downstream_gene_gene_reg = plt.subplot(gs1[4])
                     downstream_gene_gene = plt.subplot(gs1[5])
@@ -3735,18 +3809,19 @@ def plot_heatmaps(
                     plot_data[downstream_gene_protein_reg] =\
                             downstream_reg_type_data
 
-                    plot_labels[downstream_gene_gene_reg] = downstream_genes
-                    plot_labels[downstream_gene_protein_reg] = downstream_genes
+                    plot_labels[downstream_gene_gene_reg] =\
+                            downstream_genes_gene
+                    plot_labels[downstream_gene_protein_reg] =\
+                            downstream_genes_protein
 
                 for plot in expr_plots:
                     im = plot.imshow(plot_data[plot], aspect="auto",
-                                    vmin=rmin, vmax=rmax, cmap=cmap)
-
-                    plot.set_yticks([])
-                    plot.set_yticklabels([])
+                                     vmin=rmin, vmax=rmax, cmap=cmap)
 
                     plot.set_xticks([])
                     plot.set_xticklabels([])
+                    plot.set_yticks([])
+                    plot.set_yticklabels([])
 
                     if numbers:
                         for j in range(np.ma.size(plot_data[plot], 0)):
@@ -3766,28 +3841,31 @@ def plot_heatmaps(
 
                 for plot in reg_plots:
                     im = plot.imshow(plot_data[plot], aspect="auto", vmin=0.0,
-                                    vmax=1.0, cmap="binary")
+                                    vmax=1.0, cmap="PuOr_r")
 
                     plot.set_xticks([])
                     plot.set_xticklabels([])
                     plot.set_yticks(np.arange(len(plot_labels[plot])))
+                    plot.tick_params(length=0)
                     plot.set_yticklabels(plot_labels[plot])
 
                 if downstream_genes:
                     downstream_gene_protein.set_xticks(np.arange(len(tissues)))
+                    downstream_gene_protein.tick_params(length=0)
                     downstream_gene_protein.set_xticklabels([
                         tissue.replace("_", " ") for tissue in tissues])
                     plt.setp(downstream_gene_protein.get_xticklabels(),
-                            rotation=45, ha="right", rotation_mode="anchor")
+                            rotation=90, ha="right", rotation_mode="anchor")
                 else:
                     gene_protein.set_xticks(np.arange(len(tissues)))
+                    gene_protein.tick_params(length=0)
                     gene_protein.set_xticklabels([
                         tissue.replace("_", " ") for tissue in tissues])
                     plt.setp(gene_protein.get_xticklabels(),
-                            rotation=45, ha="right", rotation_mode="anchor")
+                            rotation=90, ha="right", rotation_mode="anchor")
 
-                plt.savefig(os.path.join(plot_dir, "{}.eps".format(gene_a)),
-                            format="eps", dpi=300, bbox_inches="tight")
+                plt.savefig(os.path.join(plot_dir, "{}.png".format(gene_a)),
+                            format="png", dpi=300, bbox_inches="tight")
 
             plt.close(fig)
             gene_num.update(i)
