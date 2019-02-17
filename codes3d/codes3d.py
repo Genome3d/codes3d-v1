@@ -1119,6 +1119,16 @@ def produce_summary(
         gene_exp[genes_tissues[i][0]][genes_tissues[i][1]] = expression[i][1]
 
     print("Computing HiC data...")
+
+    to_delete_snps_genes = []
+    for snp, gene in snps_genes:
+        try:
+            genes[snp][gene]
+        except KeyError:
+            to_delete_snps_genes.append((snp, gene))
+
+    snps_genes = [pair for pair in snps_genes if pair not in to_delete_snps_genes]
+
     hic_data = pool.map(calc_hic_contacts,
                         [genes[snp][gene] for snp, gene in snps_genes])
     global hic_dict
