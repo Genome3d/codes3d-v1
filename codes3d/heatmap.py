@@ -22,6 +22,8 @@ if __name__ == "__main__":
         default=(psutil.cpu_count() // 2),
         help="The maximum number of processes (default: {}).".format(
         str((psutil.cpu_count() // 2))))
+    parser.add_argument("-m", "--hpm", action="store_true", default=False,
+        help="Include protein expression data")
     parser.add_argument("-n", "--numbers", action="store_true", default=False,
         help="Label the heatmap entries with the represented value.")
     parser.add_argument("-p", "--pvalue", type=float, default=0.05,
@@ -96,11 +98,11 @@ if __name__ == "__main__":
     codes3d.build_pathway_tables(db_fp, log_fp, pathway_tsv_fp,
             input_genes)
     codes3d.build_expression_tables(args.num_processes, gtex_gene_exp_fp,
-        hpm_map_fp, hpm_gene_exp_fp, hpm_protein_exp_fp, db_fp,
+        hpm_map_fp, hpm_gene_exp_fp, hpm_protein_exp_fp, args.hpm, db_fp,
         gene_exp_tsv_fp, protein_exp_tsv_fp, input_genes)
     codes3d.produce_pathway_summary(args.buffer_size, db_fp, summary_fp,
-        input_genes)
-    codes3d.plot_heatmaps(db_fp, input_genes, plot_dir_z, plot_dir_p,
+        args.hpm, input_genes)
+    codes3d.plot_heatmaps(db_fp, input_genes, plot_dir_z, plot_dir_p, args.hpm,
                           args.pvalue, args.numbers)
 
 
