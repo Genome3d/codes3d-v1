@@ -1,6 +1,8 @@
-.gitignore
 *.pyc
-lib/
 lib
+lib/*
+!lib/gene_names.tsv
 codes3d_summary/
+codes3d_pathway/
 codes3d_output/
+.gitignore

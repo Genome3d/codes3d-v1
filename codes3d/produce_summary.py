@@ -32,18 +32,13 @@ if __name__ == "__main__":
             help="Do not produce summary files, stop process after " +\
             "querying GTEx (default: False).")
     parser.add_argument(
-            "-b","--buffer_size_in",type=int,default=1048576,
-            help="Buffer size applied to file input during compilation "+\
+            "-b","--buffer_size",type=int,default=1048576,
+            help="Buffer size applied to file I/O during compilation "+\
             " (default: 1048576).")
-    parser.add_argument(
-            "-z","--buffer_size_out",type=int,default=1048576,
-            help="Buffer size applied to file output during compilation "+\
-            " (default: 1048576).")
-    parser.add_argument(
-            "-t", "--num_processes_summary", type=int,
-            default=min(psutil.cpu_count(), 32),
-            help="The number of processes for compilation of the results " +\
-            "(default: %s)." % str(min(psutil.cpu_count(), 32)))
+    parser.add_argument("-k", "--num_processes_summary", type=int,
+            default=(psutil.cpu_count() // 2),
+            help="The maximum number of processes for summary compilation. " +\
+            "(default: %s)." % str((psutil.cpu_count() // 2)))
     args = parser.parse_args()
     config = configparser.ConfigParser()
     config.read(args.config)
@@ -65,8 +60,9 @@ if __name__ == "__main__":
 	    os.mkdir(args.output_dir)
     p_values, snps, genes = codes3d.parse_eqtls_files(
         args.eqtls_files, snp_database_fp, gene_database_fp,
-        restriction_enzymes, lib_fp, args.output_dir, args.buffer_size_in, args.fdr_threshold)
+        restriction_enzymes, lib_fp, args.output_dir, args.buffer_size,
+        args.fdr_threshold)
     codes3d.produce_summary(
         p_values, snps, genes, gene_database_fp, expression_table_fp,
-        args.fdr_threshold, args.do_not_produce_summary, args.output_dir, args.buffer_size_in,
-        args.buffer_size_out, args.num_processes_summary)
+        args.fdr_threshold, args.do_not_produce_summary, args.output_dir,
+        args.buffer_size, args.num_processes_summary)

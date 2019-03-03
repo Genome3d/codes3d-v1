@@ -1,18 +1,21 @@
-#!/usr/bin/env python
+#!usr/bin/env python
 
-from itertools import cycle
-import wikipathways_api_client
+from __future__ import print_function, division
+import itertools
 import argparse
 import ast
 import bisect
 import configparser
 import csv
 import json
+import logging
 import multiprocessing
+import math
 import operator
 import os
 import sys
 import pandas
+import progressbar
 import psutil
 import pybedtools
 import re
@@ -20,6 +23,8 @@ import requests
 import shutil
 import sqlite3
 import time
+import lxml.etree
+import lxml.html
 from operator import itemgetter
 import Bio
 from Bio import SeqIO
@@ -31,7 +36,14 @@ matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 from matplotlib import style
 from matplotlib.ticker import FuncFormatter
+from matplotlib.patches import Patch
+import matplotlib.gridspec as gridspec
 import rpy2.robjects as R
+import scipy.stats as st
+import scipy.cluster as cl
+import base64
+import re
+import numpy as np
 
 def parse_parameters(restriction_enzymes, include_cell_line, exclude_cell_line):
     """Validate user parameters -r, -n and -x.
@@ -895,15 +907,13 @@ def get_gene_expression_information(eqtls, expression_table_fp, output_dir):
         "/gene_expression_table.txt",
         sep='\t')
 
-def get_expression(gene_tissue_tuple):
+def get_expression(args):
+    gene, tissue = args
+
     try:
-        expression = list(GENE_DF.at[gene_tissue_tuple[0],
-                                     gene_tissue_tuple[1]])
-        return (expression, max(expression))
+        return list(GENE_DF.at[gene, tissue])
     except TypeError:
-        expression = list([GENE_DF.at[gene_tissue_tuple[0],
-                                      gene_tissue_tuple[1]]])
-        return (expression, expression[0])
+        return list([GENE_DF.at[gene, tissue]])
     except KeyError:
         #Foffa: to test
         #print("\t\tWarning: No expression information for %s in %s."
@@ -911,24 +921,35 @@ def get_expression(gene_tissue_tuple):
         return ([], 'NA')
 
 def get_expression_extremes(gene_exp):
-    for tissue in gene_exp.keys():
-        gene_exp[tissue] = [x for x in gene_exp[tissue] if x > 0.0]
-        if not gene_exp[tissue]:
-            del gene_exp[tissue]
+    dict_copy = gene_exp.copy()
+    for tissue in dict_copy.keys():
+        dict_copy[tissue] = [exp for exp in gene_exp[tissue]
+                             if exp and exp > 0.0]
+        if not dict_copy[tissue]:
+            del dict_copy[tissue]
 
-    if not gene_exp:
-        return ('NA', 'NA', 'NA', 'NA')
+
+    if dict_copy:
+        max_expression = max(dict_copy.iteritems(),
+                                key=lambda exp: max(exp[1]))
+        min_expression = min(dict_copy.iteritems(),
+                                key=lambda exp: min(exp[1]))
+
+        gene_exp['max_tissue'] = max_expression[0]
+        gene_exp['max_rate'] = max(max_expression[1])
+        gene_exp['min_tissue'] = min_expression[0]
+        gene_exp['min_rate'] = min(min_expression[1])
 
     max_expression = max(gene_exp.items(), key=lambda exp: max(exp[1]))
     min_expression = min(gene_exp.items(), key=lambda exp: min(exp[1]))
     return (max_expression[0], max(max_expression[1]), min_expression[0],
             min(min_expression[1]))
 
-def calc_hic_contacts(snp_gene_dict):
+def calc_hic_contacts(args):
     """Calculates score of HiC contacts between SNP and gene.
 
     Args:
-        snp_gene_dict: The snp and gene specific portion of the dictionary
+        snp_gene_dict: The snp-gene specific entry of the dictionary
         from find_genes
 
     Returns:
@@ -937,21 +958,27 @@ def calc_hic_contacts(snp_gene_dict):
         cell line
         hic_score: sum of the averages of contacts per cell line.
     """
+
+    gene, snp, snp_gene_dict = args
+
     hic_score = 0
     cell_lines = sorted(snp_gene_dict.keys())
     scores = []
+
     for cell_line in cell_lines:
         score = snp_gene_dict[cell_line]['interactions'] / float(
                         snp_gene_dict[cell_line]['replicates'])
         scores.append('{:.2f}'.format(score))
         hic_score += score
+
     return (', '.join(cell_lines), ', '.join(scores),
             "{:.4f}".format(hic_score))
 
+
 def produce_summary(
         p_values, snps, genes, gene_database_fp,
-        expression_table_fp, fdr_threshold, do_not_produce_summary, output_dir, buffer_size_in,
-        buffer_size_out, num_processes):
+        expression_table_fp, fdr_threshold, do_not_produce_summary, output_dir,
+        buffer_size, num_processes):
     """Write final results of eQTL-eGene associations
 
     Args:
@@ -999,7 +1026,6 @@ def produce_summary(
     gene_index_db.text_factory = str
     query_str = "SELECT chr, start, end FROM genes WHERE symbol=?"
     p_values_map = {}
-    print('Adjusting p-values...')
     adjusted_p_values = compute_adj_pvalues(p_values)
     for i in range(len(p_values)):
         p_values_map[p_values[i]] = adjusted_p_values[i]
@@ -1010,7 +1036,7 @@ def produce_summary(
     snps_genes = set()
     genes_tissues = set()
     eqtlfile = open(os.path.join(output_dir, 'eqtls.txt'), 'r',
-                    buffering=buffer_size_in)
+                    buffering=buffer_size)
     ereader = csv.reader(eqtlfile, delimiter = '\t')
 
     for i, row in enumerate(ereader):
@@ -1083,40 +1109,41 @@ def produce_summary(
         if gene not in gene_exp:
             gene_exp[gene] = {}
     eqtlfile.close()
-    
+
     global GENE_DF
-    # Efficiently allowing access to a shared namespace by individual processes
     GENE_DF = pandas.read_table(expression_table_fp, index_col="Description",
                                 engine='c', compression=None, memory_map=True)
 
     all_snps = genes.keys()
-    all_genes = dict.fromkeys(gene_exp).keys()
+    all_genes = gene_exp.keys()
     all_tissues = list(GENE_DF)
     genes_tissues = list(genes_tissues)
     snps_genes = list(snps_genes)
 
     current_process = psutil.Process()
-    pool = multiprocessing.Pool(processes=min(num_processes,
-                                          len(current_process.cpu_affinity())))
+    num_processes = min(num_processes, len(current_process.cpu_affinity()))
+    pool = multiprocessing.Pool(processes=num_processes)
 
-    print("Collecting gene expression rates...")
-    expression = pool.map(get_expression, genes_tissues)
+    snps = genes.keys()
+    gene_ids = list(gene_ids)
+    tissues = list(GENE_DF)
+
+    print("\n\tMultiprocessing with {} processes:".format(num_processes))
+    print("\tCollecting {} tissue-specific gene expression rates...".format(
+          len(gene_ids) * len(tissues)))
+    exp = pool.map(get_expression, [(gene, tissue)
+            for gene in gene_ids
+            for tissue in tissues])
+    gene_exp = {gene: {tissue: exp.pop(0)
+                for tissue in tissues}
+                for gene in gene_ids}
     del GENE_DF
 
-    for i in range(len(genes_tissues)):
-        gene_exp[genes_tissues[i][0]][genes_tissues[i][1]] = expression[i][0]
-
-    print("Determining gene expression extremes...")
-    extremes = pool.map(get_expression_extremes,
-                        [gene_exp[gene] for gene in all_genes])
-    for i in range(len(all_genes)):
-        gene_exp[all_genes[i]]['max_tissue'] = extremes[i][0]
-        gene_exp[all_genes[i]]['max_rate'] = extremes[i][1]
-        gene_exp[all_genes[i]]['min_tissue'] = extremes[i][2]
-        gene_exp[all_genes[i]]['min_rate'] = extremes[i][3]
-
-    for i in range(len(genes_tissues)):
-        gene_exp[genes_tissues[i][0]][genes_tissues[i][1]] = expression[i][1]
+    print("\tDetermining {} gene expression extremes...".format(
+          len(gene_ids)))
+    exp_max = pool.map(get_expression_extremes,
+                 (gene_exp[gene] for gene in gene_ids))
+    gene_exp = {gene: exp_max.pop(0) for gene in gene_ids}
 
     print("Computing HiC data...")
     hic_data = pool.map(calc_hic_contacts,
@@ -1129,7 +1156,7 @@ def produce_summary(
     print("Writing to summary files...")
     if not os.path.isdir(output_dir):
         os.mkdir(output_dir)
-    summary = open(output_dir + "/summary.txt", 'w', buffering=buffer_size_out)
+    summary = open(output_dir + "/summary.txt", 'w', buffering=buffer_size)
     summ_writer = csv.writer(summary, delimiter='\t')
     summ_header = ['SNP',
                    'SNP_Chromosome',
@@ -1158,15 +1185,14 @@ def produce_summary(
     summ_writer.writerows(to_file)
     summary.close()
     sig_file = open(os.path.join(output_dir, 'significant_eqtls.txt'), 'w',
-                    buffering=buffer_size_out)
+                    buffering=buffer_size)
     sigwriter = csv.writer(sig_file, delimiter='\t')
     sigwriter.writerow(summ_header)
     sig_eqtls = [line for line in to_file if line[9] < fdr_threshold]
     sigwriter.writerows(sig_eqtls)
     sig_file.close()
-    
 
-    return (len(sig_eqtls))
+    return gene_exp.keys()
 
 def insert_hic_info(line, snp, gene, tissue):
     try:
@@ -1191,6 +1217,7 @@ def insert_hic_info(line, snp, gene, tissue):
             gene_exp[gene]['min_tissue'],
             gene_exp[gene]['min_rate']))
         return line
+
 
 def compute_adj_pvalues(p_values):
     """ A Benjamini-Hochberg adjustment of p values of SNP-gene eQTL
@@ -1234,8 +1261,8 @@ def produce_overview(genes, eqtls, num_sig, output_dir):
         os.mkdir(output_dir + "/plots")
     int_colours = "rgb"
     eqtl_colours = "myc"
-    int_colours = cycle(int_colours)
-    eqtl_colours = cycle(eqtl_colours)
+    int_colours = itertools.cycle(int_colours)
+    eqtl_colours = itertools.cycle(eqtl_colours)
     snps_by_chr = {}
     for snp in eqtls:
         chrm = eqtls[snp]["snp_info"]["chr"]
@@ -1315,65 +1342,6 @@ def natural_keys(text):
 def abs_value_ticks(x, pos):
     return abs(x)
 
-
-def retrieve_pathways(eqtls, fdr_threshold, num_processes, output_dir):
-    print("Retrieving pathway information...")
-    manager = multiprocessing.Manager()
-    procPool = multiprocessing.Pool(processes=num_processes)
-    pathways = {}  # Keeps track of all pathways covered by genes with a statistically signficant eQTL relationship with a query SNP
-    pwresults = manager.list()
-
-    for snp in eqtls:
-        for gene in eqtls[snp]:
-            if not gene == "snp_info":
-                for tissue in eqtls[snp][gene]["tissues"]:
-                    if eqtls[snp][gene]["tissues"][tissue]["qvalue"] < fdr_threshold:
-                        procPool.apply_async(
-                            get_wikipathways_response, [
-                                snp, gene, tissue, pwresults])
-    procPool.close()
-    procPool.join()
-
-    for response in pwresults:
-        snp = response[0]
-        gene = response[1]
-        tissue = response[2]
-        for pwres in response[3]:
-            pwid = pwres["identifier"]
-            if not pwid in pathways:
-                pathways[pwid] = {}
-                pathways[pwid]["name"] = pwres["name"]
-                pathways[pwid]["genes"] = {}
-            if not gene in pathways[pwid]["genes"]:
-                pathways[pwid]["genes"][gene] = {}
-            if not snp in pathways[pwid]["genes"][gene]:
-                pathways[pwid]["genes"][gene][snp] = set([])
-            pathways[pwid]["genes"][gene][snp].add(tissue)
-
-    with open(output_dir + "/pathways.txt", 'w') as pwfile:
-        pwfile.write(
-            "WikiPathways_ID\tPathway_Name\tGene_Symbol\tSNP\tTissue\n")
-        for pwid in pathways:
-            for gene in pathways[pwid]["genes"]:
-                for snp in pathways[pwid]["genes"][gene]:
-                    for tissue in pathways[pwid]["genes"][gene][snp]:
-                        pwfile.write(
-                            "%s\t%s\t%s\t%s\t%s\n" %
-                            (pwid, pathways[pwid]["name"], gene, snp, tissue))
-    return pathways
-
-
-def get_wikipathways_response(snp, gene, tissue, pwresults):
-    wikipathways = wikipathways_api_client.WikipathwaysApiClient()
-    kwargs = {
-        'query': gene,
-        'organism': 'http://identifiers.org/taxonomy/9606'  # Homo sapiens
-    }
-    res = wikipathways.find_pathways_by_text(**kwargs)
-    if res:
-        pwresults.append([snp, gene, tissue, res])
-
-
 def parse_snps_files(snps_files):
     snps = {}
     for snp_file in snps_files:
@@ -1438,8 +1406,8 @@ def parse_genes_files(genes_files):
     return genes
 
 ### Function to remove duplicate lines from txt files
-def remove_dups(inputfile, outputfile, buffer_size_in):
-    lines = open(inputfile, 'r', buffering=buffer_size_in).readlines()
+def remove_dups(inputfile, outputfile, buffer_size):
+    lines = open(inputfile, 'r', buffering=buffer_size).readlines()
     lines_set = set(lines)
     out = open(outputfile, 'w')
     for line in lines_set:
@@ -1448,7 +1416,7 @@ def remove_dups(inputfile, outputfile, buffer_size_in):
 
 def parse_eqtls_files(
         eqtls_files, snp_database_fp, gene_database_fp,
-        restriction_enzymes, lib_fp, output_dir, buffer_size_in, fdr_threshold=0.05):
+        restriction_enzymes, lib_fp, output_dir, buffer_size, fdr_threshold=0.05):
     print("Merging files...")
     eqtls = {}
     snps = {}
@@ -1484,7 +1452,7 @@ def parse_eqtls_files(
 
     # Removing duplicates from merged eqtls
     uniq_eqtls = os.path.join(output_dir, 'eqtls.txt')
-    remove_dups(os.path.join(output_dir, 'tmp_eqtls.txt'), uniq_eqtls, buffer_size_in)
+    remove_dups(os.path.join(output_dir, 'tmp_eqtls.txt'), uniq_eqtls, buffer_size)
     os.remove(os.path.join(output_dir, 'tmp_eqtls.txt'))
 
     # Merging genes files
@@ -1496,7 +1464,7 @@ def parse_eqtls_files(
 
     # Removing duplicates from merged genes
     uniq_genes = os.path.join(output_dir, 'genes.txt')
-    remove_dups(os.path.join(output_dir, 'tmp_genes.txt'), uniq_genes, buffer_size_in)
+    remove_dups(os.path.join(output_dir, 'tmp_genes.txt'), uniq_genes, buffer_size)
     os.remove(os.path.join(output_dir, 'tmp_genes.txt'))
     print("Parsing genes...")
     genes = parse_genes_files(os.path.join(output_dir, 'genes.txt'))
@@ -1510,12 +1478,12 @@ def parse_eqtls_files(
 
     # Removing duplicates from merged snps
     uniq_snps = os.path.join(output_dir, 'snps.txt')
-    remove_dups(os.path.join(output_dir, 'tmp_snps.txt'), uniq_snps, buffer_size_in)
+    remove_dups(os.path.join(output_dir, 'tmp_snps.txt'), uniq_snps, buffer_size)
     os.remove(os.path.join(output_dir, 'tmp_snps.txt'))
 
     print("Parsing eqtls...")
     eqtlfile = open(os.path.join(output_dir, 'eqtls.txt'), 'r')
-    ereader = csv.reader(eqtlfile, delimiter='\t')	
+    ereader = csv.reader(eqtlfile, delimiter='\t')
     for i, row in enumerate(ereader, 1):
         snp = row[0]
         gene = row[1]
@@ -2088,6 +2056,2083 @@ def build_eqtl_index(
         os.remove(table_fp)
 
 
+def retry_request(url, times=10, pause=60):
+    """"""
+    for i in range(times):
+        time.sleep(pause)
+        try:
+            retried_response = requests.get(url)
+        except requests.exceptions.ConnectionError:
+            logging.error("Connection failure: %s", url)
+            continue
+        except requests.exceptions.RequestException:
+            logging.error("Error: %s", url)
+            continue
+        try:
+            retried_response.raise_for_status()
+            return retried_response
+        except requests.exceptions.HTTPError:
+            logging.error("Unsucessful status code: %s: %s",
+                    retried_response.status_code, url)
+            continue
+    else:
+        return None
+
+def request(url):
+    """"""
+    while True:
+        try:
+            response = requests.get(url)
+            break
+        except requests.exceptions.ConnectionError:
+            logging.error("Connection failure: %s", url)
+            time.sleep(60)
+            continue
+        except requests.exceptions.RequestException:
+            logging.error("Error: %s", url)
+            return None
+
+    try:
+        response.raise_for_status()
+    except requests.exceptions.HTTPError:
+        if response.status_code in (502,):
+            response = retry_request(url)
+            if response is None:
+                logging.error("Unsucessful status code: %s: %s",
+                               response.status_code, url)
+                return None
+
+        else:
+            logging.error("Unsucessful status code: %s: %s",
+                          response.status_code, url)
+            return None
+
+    content_type = response.headers["Content-Type"].split("; ")[0]
+
+    if content_type == "application/json":
+        try:
+            return response.json()
+        except ValueError:
+            logging.error("Invalid JSON content: %s", url)
+            return None
+
+    elif content_type == "application/xml":
+        try:
+            content = lxml.etree.fromstring(response.text)
+        except lxml.etree.LxmlSyntaxError:
+            for i in range(10):
+                retried_response = retry_request(url, times=1)
+                if retried_response is not None:
+                    try:
+                        content = lxml.etree.fromstring(retried_response.text)
+                        break
+                    except lxml.etree.LxmlSyntaxError:
+                        continue
+            else:
+                logging.error("Invalid XML content: %s", url)
+                return None
+
+        reg = "^https://webservice.wikipathways.org/" +\
+              "getPathwayAs\?fileType=gpml&pwId=WP[0-9]+&revision=0$"
+
+        if re.match(reg, url):
+            try:
+                return lxml.etree.fromstring(base64.b64decode(
+                            content.find("ns1:data", content.nsmap).text))
+
+            except TypeError, lxml.etree.LxmlSyntaxError:
+                logging.error("Invalid GPML content: %s", url)
+                return None
+        else:
+            return content
+
+    elif content_type == "text/xml":
+        reg = "^http://rest.kegg.jp/get/hsa[0-9]+/kgml$"
+        kgml = re.match(reg, url)
+
+        try:
+            content = lxml.etree.fromstring(response.text)
+        except lxml.etree.XMLSyntaxError:
+            if kgml:
+                logging.error("Invalid KGML content: %s", url)
+            else:
+                logging.error("Invalid XML content: %s", url)
+            content = None
+
+        if content is not None and kgml:
+            try:
+                header = content.xpath("/comment()[1]")[0].text
+            except IndexError:
+                header = None
+            return header, content
+        elif content is not None:
+            return content
+        elif kgml:
+            return None, None
+        else:
+            return None
+
+    elif content_type == "text/html":
+        try:
+            return lxml.html.fromstring(response.text)
+        except ValueError:
+            logging.error("Invalid HTML content: %s", url)
+            return None
+
+    elif content_type == "text/plain":
+        return response.text
+
+    else:
+        logging.error("Unsupported content type %s: %s",
+                url, response.headers["Content-Type"])
+        return None
+
+def kegg(gene):
+    """"""
+    kegg_api_url = "http://rest.kegg.jp"
+    response = request("{}/find/genes/{}".format(kegg_api_url, gene))
+
+    if response is None:
+        return []
+
+    gene_entries = response.split("\n")
+    gene_id = None
+
+    for entry in [entry.split("\t") for entry in gene_entries if entry]:
+        if (entry[0].split(":")[0] == "hsa" and
+               gene in entry[1].split(";")[0].split(",")):
+            gene_id = entry[0]
+            break
+
+    if gene_id is None:
+        return []
+
+    pathways = set()
+    response = request("{}/link/pathway/{}".format(kegg_api_url, gene_id))
+
+    if response is None:
+        return []
+
+    pathway_entries = response.split("\n")
+    pathway_ids = [entry.split("\t")[1].split(":")[1]
+                   for entry in pathway_entries if entry]
+
+    pathways = {}
+    for pathway_id in pathway_ids:
+        pathways[pathway_id] = {}
+        response = request("{}/get/{}".format(kegg_api_url, pathway_id))
+
+        if response is None:
+            pathways[pathway_id]["name"] = "NA"
+            continue
+
+        pathway_entries = response.split("\n")
+
+        for entry in pathway_entries:
+            if entry.startswith("NAME"):
+                pathway_name = entry.replace("NAME", "").replace(
+                    "- Homo sapiens (human)", "").strip()
+                pathways[pathway_id]["name"] = pathway_name
+                break
+
+    for pathway_id in pathway_ids:
+        response = request("{}/get/{}/kgml".format(kegg_api_url, pathway_id))
+
+        if response is None:
+            pathways[pathway_id]["version"] = "NA"
+            pathways[pathway_id]["upstream"] = set()
+            pathways[pathway_id]["downstream"] = set()
+
+        else:
+            header_comment, response = response
+
+            entry_ids = set()
+            for entry in response.findall("entry"):
+                if (entry.get("type") == "gene" and
+                        gene_id in entry.get("name").split(" ")):
+                    entry_ids.add(entry.get("id"))
+
+            upstream_entry_ids = set()
+            downstream_entry_ids = set()
+            for relation in response.findall("relation"):
+                if relation.get("type") == "PPrel":
+                    if relation.get("entry1") in entry_ids:
+                        downstream_entry_ids.add(relation.get("entry2"))
+
+                    if relation.get("entry2") in entry_ids:
+                        upstream_entry_ids.add(relation.get("entry1"))
+
+            upstream_gene_ids = set()
+            downstream_gene_ids = set()
+            for entry in response.findall("entry"):
+                if (entry.get("id") in upstream_entry_ids and
+                        entry.get("type") == "gene"):
+                    upstream_gene_ids |= set(entry.get("name").split(" "))
+                if (entry.get("id") in downstream_entry_ids and
+                        entry.get("type") == "gene"):
+                    downstream_gene_ids |= set(entry.get("name").split(" "))
+
+            upstream_gene_ids.discard("undefined")
+            downstream_gene_ids.discard("undefined")
+
+            if upstream_gene_ids or downstream_gene_ids:
+                query_genes = list(upstream_gene_ids | downstream_gene_ids)
+
+                # Limitation of URL length avoiding denial of request
+                gene_subsets = [query_genes[i:i+100]
+                                for i in xrange(0, len(query_genes), 100)]
+
+                gene_name = {}
+                for gene_subset in gene_subsets:
+                    genes_str = "+".join(gene_subset)
+                    response = request("{}/list/{}".format(kegg_api_url,
+                                    genes_str), "text/plain")
+
+                    if response is None:
+                        continue
+
+                    for entry in [entry.split("\t")
+                                for entry in response[:-1].split("\n")]:
+                        if ";" in entry[1]:
+                            gene_name[entry[0]] =\
+                                    entry[1].split(";")[0].split(",")[0]
+                        else:
+                            upstream_gene_ids.discard(entry[0])
+                            downstream_gene_ids.discard(entry[0])
+
+                upstream_genes = set(gene_name[gene_id]
+                                    for gene_id in upstream_gene_ids)
+                downstream_genes = set(gene_name[gene_id]
+                                    for gene_id in downstream_gene_ids)
+
+                upstream_genes.discard(gene)
+                downstream_genes.discard(gene)
+
+            else:
+                upstream_genes, downstream_genes = set(), set()
+
+            pathways[pathway_id]["upstream"] = upstream_genes
+            pathways[pathway_id]["downstream"] = downstream_genes
+
+            months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul",
+                      "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+            if (header_comment and
+                header_comment[:16] == " Creation date: " and
+                len(header_comment.split(" ")) > 5 and
+                header_comment.split(" ")[3] in months):
+                header_comment = header_comment.split(" ")
+                month = str(months.index(header_comment[3]) + 1)
+                day = header_comment[4].replace(",", "")
+                year = header_comment[5]
+                pathway_version = "-".join([year, month, day])
+                pathways[pathway_id]["version"] = pathway_version
+            else:
+                pathways[pathway_id]["version"] = "NA"
+
+    pathways = [[unicode(gene, "utf-8"),
+                 unicode(pathway_id),
+                 unicode(pathways[pathway_id]["version"]),
+                 unicode(pathways[pathway_id]["name"]),
+                 tuple(sorted(list(pathways[pathway_id]["upstream"]))),
+                 tuple(sorted(list(pathways[pathway_id]["downstream"])))]
+                 for pathway_id in pathway_ids
+                 if pathways[pathway_id]["upstream"] or
+                    pathways[pathway_id]["downstream"]]
+
+    return sorted(pathways, key=lambda pathway: pathway[1])
+
+class GeneName():
+    """"""
+    def __init__(self, pathway_db_gene_name_fp):
+        self.integer = re.compile("^[0-9]+$")
+
+        self.synonym = {}
+        with open(pathway_db_gene_name_fp) as gene_syn_file:
+            gene_syn_reader = csv.reader(gene_syn_file, delimiter="\t")
+            next(gene_syn_reader)
+
+            for row in gene_syn_reader:
+                if row[1] != "-":
+                    for syn in row[1].split("|"):
+                        self.synonym[syn.lower()] = row[0]
+                self.synonym[row[2].lower()] = row[0]
+
+    def correct(self, gene_name):
+        gene_name = gene_name.replace("\n"," ").replace("  ", " ")
+        gene_name = gene_name.strip("\"'()?*")
+        gene_name = gene_name.split("(")[0].strip()
+
+        if self.integer.match(gene_name):
+            return None
+
+        return self.synonym.get(gene_name.lower(), gene_name)
+
+def reactome(gene):
+    """"""
+    reactome_api_url = "https://www.reactome.org/ContentService"
+
+    response = request(
+        "{}/data/mapping/UniProt/{}/pathways?species=9606".format(
+            reactome_api_url, gene))
+
+    if response is None:
+        return []
+
+    pathways = {}
+    for entry in response:
+        pathway_id = entry["stId"]
+        pathways[pathway_id] = {}
+        pathways[pathway_id]["name"] = entry["displayName"]
+        pathways[pathway_id]["version"] = entry["stIdVersion"].split(".")[1]
+
+
+    response = request(
+            "{}/data/mapping/UniProt/{}/reactions?species=9606".format(
+                reactome_api_url, gene))
+
+    gene_reaction_ids = set()
+    if response is not None:
+        for entry in response:
+            gene_reaction_ids.add(entry["stId"])
+
+    reactions_to_pathways = {}
+    for pathway_id in pathways:
+        response = request("{}/data/pathway/{}/containedEvents/stId".format(
+            reactome_api_url, pathway_id))
+
+        if response is None:
+            reactions_to_pathways[pathway_id] = set()
+            continue
+
+        response_values = set(response.strip("[]").split(", "))
+        pathway_reaction_ids = response_values & gene_reaction_ids
+        reactions_to_pathways[pathway_id] = pathway_reaction_ids
+
+    reaction_ids = set(itertools.chain.from_iterable(
+                                reactions_to_pathways.values()))
+    reactions = {}
+    for reaction_id in reaction_ids:
+        reactions[reaction_id] = {}
+        reactions[reaction_id]["input"] = set()
+        reactions[reaction_id]["output"] = set()
+
+        response = request("{}/data/query/{}".format(
+            reactome_api_url, reaction_id))
+
+        if response is None:
+            continue
+
+        if "input" in response:
+            for metabolite in response["input"]:
+                if (isinstance(metabolite, dict) and
+                        metabolite["className"] == "Protein"):
+                    name = metabolite["displayName"]
+                    name = name.split(" [")[0].split("(")[0]
+                    reactions[reaction_id]["input"].add(
+                            gene_name.correct(name))
+
+        if "output" in response:
+            for metabolite in response["output"]:
+                if (isinstance(metabolite, dict) and
+                        metabolite["className"] == "Protein"):
+                    name = metabolite["displayName"]
+                    name = name.split(" [")[0].split("(")[0]
+                    reactions[reaction_id]["output"].add(
+                            gene_name.correct(name))
+
+    for pathway_id in pathways:
+        pathways[pathway_id]["input"] = set()
+        pathways[pathway_id]["output"] = set()
+        for reaction_id in reactions_to_pathways[pathway_id]:
+            if gene in reactions[reaction_id]["input"]:
+                pathways[pathway_id]["output"] |=\
+                        reactions[reaction_id]["output"]
+            if gene in reactions[reaction_id]["output"]:
+                pathways[pathway_id]["input"] |=\
+                        reactions[reaction_id]["input"]
+
+        pathways[pathway_id]["input"].discard(gene)
+        pathways[pathway_id]["output"].discard(gene)
+
+
+    pathways = [[unicode(gene, "utf-8"),
+                 pathway_id,
+                 pathways[pathway_id]["version"],
+                 pathways[pathway_id]["name"],
+                 tuple(sorted(list(pathways[pathway_id]["input"]))),
+                 tuple(sorted(list(pathways[pathway_id]["output"])))]
+                 for pathway_id in pathways
+                 if pathways[pathway_id]["input"] or
+                    pathways[pathway_id]["output"]]
+
+    return sorted(pathways, key=lambda pathway: pathway[1])
+
+def wikipathways(gene,
+                 exclude_reactome=False,
+                 exclude_homology_mappings=True):
+    """"""
+    wikipathways_api_url = "https://webservice.wikipathways.org"
+    discard_tags = {"Curation:Hypothetical",
+                    "Curation:NoInteractions",
+                    "Curation:Tutorial",
+                    "Curation:UnderConstruction"}
+
+
+    if exclude_reactome:
+        discard_tags.add("Curation:Reactome_Approved")
+
+    response = request(
+        "{}/findPathwaysByText?query={}&species=Homo_sapiens".format(
+            wikipathways_api_url, gene))
+
+    if response is None:
+        return []
+
+    pathways = []
+    for result in response.findall("ns1:result", response.nsmap):
+        pathway = {}
+        pathway["id"] = result.find("ns2:id", response.nsmap).text
+        pathway["revision"] = result.find("ns2:revision", response.nsmap).text
+        pathway["name"] = result.find("ns2:name", response.nsmap).text
+
+        pathway["input"] = {}
+        pathway["output"] = {}
+
+        pathways.append(pathway)
+
+    for pathway in pathways[:]:
+        response = request("{}/getCurationTags?pwId={}".format(
+                           wikipathways_api_url, pathway["id"]))
+
+        if response is None:
+            continue
+
+        for tag in response.findall("ns1:tags", response.nsmap):
+            if tag.find("ns2:name", response.nsmap).text in discard_tags:
+                pathways.remove(pathway)
+                break
+
+    for pathway in pathways[:]:
+        response = request(
+                "{}/getPathwayAs?fileType=gpml&pwId={}&revision=0".format(
+                wikipathways_api_url, pathway["id"]))
+
+        if response is None:
+            continue
+
+        nsmap = {}
+        nsmap["gpml"] = response.nsmap[None]
+
+        homology_mapped_pathway = False
+        if exclude_homology_mappings:
+            for comment in response.findall("gpml:Comment", nsmap):
+                if comment.get("Source") == "HomologyMapper":
+                    homology = True
+                    break
+        if homology_mapped_pathway:
+            pathways.remove(pathway)
+            continue
+
+        group_to_graph, graph_to_group = {}, {}
+        for group in response.findall("gpml:Group", nsmap):
+            group_id = group.get("GroupId")
+            graph_id = group.get("GraphId")
+            if graph_id:
+                group_to_graph[group_id] = graph_id
+                graph_to_group[graph_id] = group_id
+
+        graph_ids = set()
+        corrected_name = {}
+
+        for data_node in response.findall("gpml:DataNode", nsmap):
+            text_label = data_node.attrib["TextLabel"]
+
+            if isinstance(text_label, str):
+                corrected_name[text_label] = gene_name.correct(text_label)
+
+                if corrected_name[text_label] == gene:
+                    graph_id = data_node.get("GraphId")
+                    if graph_id:
+                        graph_ids.add(graph_id)
+
+                    group_ref = data_node.get("GroupRef")
+                    if group_ref in group_to_graph:
+                        graph_ids.add(group_to_graph[group_ref])
+
+        input_ids = {"non-group": {}, "group": {}}
+        output_ids = {"non-group": {}, "group": {}}
+
+        for interaction in response.findall("gpml:Interaction", nsmap):
+            points = interaction.find("gpml:Graphics", nsmap).findall(
+                    "gpml:Point", nsmap)
+
+            input_ref = points[0].get("GraphRef")
+            output_ref = points[-1].get("GraphRef")
+            regulation_type = points[-1].get("ArrowHead")
+
+            if input_ref in graph_ids:
+                if output_ref in graph_to_group:
+                    output_ref = graph_to_group[output_ref]
+                    output_ids["group"][output_ref] = regulation_type
+                else:
+                    output_ids["non-group"][output_ref] = regulation_type
+
+            if output_ref in graph_ids:
+                if input_ref in graph_to_group:
+                    input_ref = graph_to_group[input_ref]
+                    input_ids["group"][input_ref] = regulation_type
+                else:
+                    input_ids["non-group"][input_ref] = regulation_type
+
+        if (input_ids["non-group"] or
+            input_ids["group"] or
+            output_ids["non-group"] or
+            output_ids["group"]):
+
+            for data_node in response.findall("gpml:DataNode", nsmap):
+                if data_node.get("Type") == "GeneProduct":
+                    xref = data_node.find("gpml:Xref", nsmap)
+                    if not (xref.get("Database") and xref.get("ID")):
+                        continue
+
+                    graph_id = data_node.get("GraphId")
+                    group_ref = data_node.get("GroupRef")
+
+                    if graph_id or group_ref:
+                        text_label = data_node.attrib["TextLabel"]
+                        name = corrected_name.get(text_label)
+
+                        if not name or name == gene:
+                            continue
+
+                        name = unicode(name, "utf-8")
+
+                        if graph_id in input_ids["non-group"]:
+                            if input_ids["non-group"][graph_id] == "Arrow":
+                                pathway["input"][name] = [True, False]
+                            elif input_ids["non-group"][graph_id] == "TBar":
+                                pathway["input"][name] = [False, True]
+                            else:
+                                pathway["input"][name] = [False, False]
+
+                        if group_ref in input_ids["group"]:
+                            if input_ids["group"][group_ref] == "Arrow":
+                                pathway["input"][name] = [True, False]
+                            elif input_ids["group"][group_ref] == "TBar":
+                                pathway["input"][name] = [False, True]
+                            else:
+                                pathway["input"][name] = [False, False]
+
+                        if graph_id in output_ids["non-group"]:
+                            if output_ids["non-group"][graph_id] == "Arrow":
+                                pathway["output"][name] = [True, False]
+                            elif output_ids["non-group"][graph_id] == "TBar":
+                                pathway["output"][name] = [False, True]
+                            else:
+                                pathway["output"][name] = [False, False]
+
+                        if group_ref in output_ids["group"]:
+                            if output_ids["group"][group_ref] == "Arrow":
+                                pathway["output"][name] = [True, False]
+                            elif output_ids["group"][group_ref] == "TBar":
+                                pathway["output"][name] = [False, True]
+                            else:
+                                pathway["output"][name] = [False, False]
+
+    pathways = [[unicode(pathway["id"], "utf-8"),
+                 unicode(pathway["revision"], "utf-8"),
+                 unicode(pathway["name"], "utf-8"),
+                 pathway["input"],
+                 pathway["output"]]
+                 for pathway in pathways]
+
+    return sorted(pathways, key=lambda pathway: pathway[0])
+
+def log_kegg_release():
+    """"""
+    kegg_info_url = "http://rest.kegg.jp/info/pathway"
+    response = request(kegg_info_url)
+
+    if response is None:
+        logging.info("KEGG version: NA")
+    else:
+        response = response.split("\n")
+        release = response[1].replace("path", "").strip()
+        release = release.split("/")[0].split(" ")[1]
+        release = release.strip("+")
+        logging.info("KEGG version: %s", release)
+
+    return None
+
+def log_reactome_release():
+    """"""
+    reactome_info_url =\
+        "https://reactome.org/ContentService/data/database/version"
+
+    release = request(reactome_info_url)
+    if not release:
+        logging.info("Reactome version: NA")
+    else:
+        logging.info("Reactome version: %s", release)
+
+    return None
+
+def get_wikipathways_release():
+    """"""
+    wikipathways_info_url = "http://data.wikipathways.org/"
+    response = request(wikipathways_info_url)
+
+    if response is None:
+        return None
+    else:
+        table = response.find("body").find("div").find("table")
+        for tr in table.find("tbody").findall("tr"):
+            if tr.find("td").find("a").text == "current":
+                break
+            release = tr.find("td").find("a").text
+
+        release = "-".join([release[0:4], release[4:6], release[6:8]])
+        return release
+
+def get_exp(args):
+    """"""
+    gene, tissue = args
+
+    try:
+       exp = GENE_DF.at[gene, tissue]
+    except KeyError:
+        return None
+
+    if isinstance(exp, np.float64):
+        return exp
+    elif isinstance(exp, np.ndarray):
+        return exp.max()
+    else:
+        return None
+
+def normalize_distribution(exp):
+    """"""
+    mean = sum([exp[tissue] for tissue in exp])/len(exp)
+    sdv = math.sqrt(sum([(exp[tissue] - mean)**2
+                    for tissue in exp])/(len(exp) - 1))
+
+    if sdv == 0.0:
+        exp_z = {tissue: 0.0 for tissue in exp}
+    else:
+        exp_z = {tissue: (exp[tissue] - mean) / sdv for tissue in exp}
+
+    exp_p = {tissue: 1 - st.norm.cdf(exp_z[tissue])
+             if exp_z[tissue] > 0.0 else st.norm.cdf(exp_z[tissue])
+             for tissue in exp}
+
+    exp = {tissue: (exp[tissue], exp_z[tissue], exp_p[tissue])
+           for tissue in exp}
+
+    return exp
+
+
+def build_expression_tables(
+        num_processes,
+        gtex_gene_exp_fp,
+        hpm_map_fp,
+        hpm_gene_exp_fp,
+        hpm_protein_exp_fp,
+        hpm,
+        db_fp,
+        gene_exp_tsv_fp,
+        protein_exp_tsv_fp,
+        genes):
+    """"""
+    gene_tsv_file = open(gene_exp_tsv_fp, "w", buffering=1)
+    gene_tsv_writer = csv.writer(gene_tsv_file, delimiter="\t",
+                                 lineterminator="\n")
+    if hpm:
+        protein_tsv_file = open(protein_exp_tsv_fp, "w", buffering=1)
+        protein_tsv_writer = csv.writer(protein_tsv_file, delimiter="\t",
+                                 lineterminator="\n")
+    tsv_header = ["Gene",
+                  "Tissue",
+                  "Expression",
+                  "z-Score",
+                  "p-Value"]
+    gene_tsv_writer.writerow(tsv_header)
+
+    if hpm:
+        protein_tsv_writer.writerow(tsv_header)
+
+    pathway_db = sqlite3.connect(db_fp)
+    pathway_db.text_factory = str
+    pathway_db_cursor = pathway_db.cursor()
+
+    upstream_genes = set([upstream_gene for (upstream_gene,)
+                          in pathway_db_cursor.execute("""
+                              SELECT
+                                  upstream_gene
+                              FROM
+                                  UpstreamGenes""")])
+    genes = set(genes) | upstream_genes
+
+    downstream_genes = set([downstream_gene for (downstream_gene,)
+                            in pathway_db_cursor.execute("""
+                              SELECT
+                                  downstream_gene
+                              FROM
+                                  DownstreamGenes""")])
+    genes |= downstream_genes
+
+    print("Number of genes including up- and downstream genes: {}".format(
+          len(genes)), end=2*"\n")
+
+
+    pathway_db_cursor.execute("""
+        DROP TABLE IF EXISTS
+            GeneExpression
+        """)
+    pathway_db_cursor.execute("""
+        DROP TABLE IF EXISTS
+            ProteinExpression
+        """)
+
+    pathway_db_cursor.execute("""
+        CREATE TABLE
+            GeneExpression (
+                gene TEXT,
+                tissue TEXT,
+                gene_exp REAL,
+                gene_exp_z REAL,
+                gene_exp_p REAL,
+                PRIMARY KEY (
+                    gene,
+                    tissue)
+                ON CONFLICT IGNORE)
+            """)
+
+    if hpm:
+        pathway_db_cursor.execute("""
+            CREATE TABLE
+                ProteinExpression (
+                    gene TEXT,
+                    tissue TEXT,
+                    protein_exp REAL,
+                    protein_exp_z REAL,
+                    protein_exp_p REAL,
+                    PRIMARY KEY (
+                        gene,
+                        tissue)
+                    ON CONFLICT IGNORE)
+                """)
+
+    if genes:
+        global GENE_DF
+        GENE_DF = pandas.read_table(gtex_gene_exp_fp,
+                                    index_col="Description", engine='c',
+                                    compression=None, memory_map=True)
+
+        current_process = psutil.Process()
+        num_processes = min(num_processes, len(current_process.cpu_affinity()))
+        pool = multiprocessing.Pool(processes=num_processes)
+
+        gtex_tissues = list(GENE_DF)
+
+        exp = pool.map(get_exp,
+                [(gene, tissue) for gene in genes for tissue in gtex_tissues])
+
+        gene_exp = {gene: {tissue: exp.pop(0)
+                           for tissue in gtex_tissues}
+                    for gene in genes}
+
+        del GENE_DF
+        pool.close()
+
+        for gene in gene_exp.keys():
+            for tissue in gene_exp[gene].keys():
+                if gene_exp[gene][tissue] is None:
+                    del gene_exp[gene][tissue]
+            if not gene_exp[gene]:
+                del gene_exp[gene]
+
+        if hpm:
+            accessions = {}
+            with open(hpm_map_fp, "r") as gene_map_file:
+                gene_map_reader = csv.reader(gene_map_file)
+                next(gene_map_reader)
+
+                for line in gene_map_reader:
+                    for gene in line[3].split(";"):
+                        if gene in genes:
+
+                            if gene not in accessions:
+                                accessions[gene] = set()
+
+                            accessions[gene] |= set([accession.split("|")[1]
+                                            for accession in line[2].split(";")])
+
+            accession_exp = {}
+            with open(hpm_protein_exp_fp, "r") as protein_exp_file:
+                protein_exp_reader = csv.reader(protein_exp_file)
+                header = next(protein_exp_reader)
+
+                hpm_tissues = {i: header[i].replace("Adult ", "").replace(" ", "_")
+                            for i in range(len(header))
+                            if header[i][:6] == "Adult "}
+
+                for line in protein_exp_reader:
+                    accession = line[0]
+                    accession_exp[accession] = {}
+                    for i in hpm_tissues:
+                        tissue = hpm_tissues[i]
+                        accession_exp[accession][tissue] = float(line[i])
+
+            protein_exp = {}
+            for gene in accessions:
+                protein_exp[gene] = {tissue: sum([accession_exp[accession][tissue]
+                                    for accession in accessions[gene]])
+                                    for tissue in accession_exp[accession]}
+
+            with open(hpm_gene_exp_fp, "r") as gene_exp_file:
+                gene_exp_reader = csv.reader(gene_exp_file)
+                header = next(gene_exp_reader)
+
+                hpm_tissues = {i: header[i].replace("Adult ", "").replace(" ", "_")
+                            for i in range(len(header))
+                            if header[i][:6] == "Adult "}
+
+                for line in gene_exp_reader:
+                    gene = line[0]
+                    if gene in genes:
+                        if gene not in protein_exp:
+                            protein_exp[gene] = {}
+
+                        for i in hpm_tissues:
+                            tissue = hpm_tissues[i]
+                            if float(line[i]) == 0.0:
+                                protein_exp[gene][tissue] = 0.0
+
+            exp = merge_gtex_hpm(gene_exp, protein_exp)
+
+        else:
+            exp = {"gene": gene_exp}
+
+        gene_coverage = " ({:.2f}%)".format((len(exp["gene"])/len(genes))*100)
+
+        if hpm:
+            protein_coverage = " ({:.2f}%)".format((len(exp["protein"])/\
+                                                        len(genes))*100)
+    else:
+        gene_coverage = ""
+        exp = {"gene":{}}
+
+        if hpm:
+            protein_coverage = ""
+            exp["protein"] = {}
+
+    if exp["gene"]:
+        print("Mapping gene expression information...")
+        gene_num = progressbar.ProgressBar(max_value=len(exp["gene"]))
+        gene_num.update(0)
+
+        for i, gene in enumerate(sorted(exp["gene"]), 1):
+            exp["gene"][gene] = normalize_distribution(exp["gene"][gene])
+            for tissue in sorted(exp["gene"][gene]):
+                pathway_db_cursor.execute("""
+                    INSERT INTO
+                        GeneExpression
+                    VALUES
+                        (?, ?, ?, ?, ?)
+                    """,
+                    (unicode(gene, "utf-8"),
+                    unicode(tissue, "utf-8"),
+                    exp["gene"][gene][tissue][0],
+                    exp["gene"][gene][tissue][1],
+                    exp["gene"][gene][tissue][2]))
+
+                gene_tsv_writer.writerow([
+                    gene,
+                    tissue,
+                    exp["gene"][gene][tissue][0],
+                    exp["gene"][gene][tissue][1],
+                    exp["gene"][gene][tissue][2]])
+
+            pathway_db.commit()
+            gene_num.update(i)
+
+        gene_num.finish()
+    gene_tsv_file.close()
+
+    print("Number of genes covered by gene expression data: {}{}".format(
+          len(exp["gene"]), gene_coverage), end=2*"\n")
+
+    if hpm and exp["protein"]:
+        print("Mapping protein expression information...")
+        gene_num = progressbar.ProgressBar(max_value=len(exp["protein"]))
+        gene_num.update(0)
+
+        for i, gene in enumerate(sorted(exp["protein"]), 1):
+            exp["protein"][gene] = normalize_distribution(exp["protein"][gene])
+            for tissue in sorted(exp["protein"][gene]):
+                pathway_db_cursor.execute("""
+                    INSERT INTO
+                        ProteinExpression
+                    VALUES
+                        (?, ?, ?, ?, ?)
+                    """,
+                    (unicode(gene, "utf-8"),
+                    unicode(tissue, "utf-8"),
+                    exp["protein"][gene][tissue][0],
+                    exp["protein"][gene][tissue][1],
+                    exp["protein"][gene][tissue][2]))
+
+                protein_tsv_writer.writerow([
+                    gene,
+                    tissue,
+                    exp["protein"][gene][tissue][0],
+                    exp["protein"][gene][tissue][1],
+                    exp["protein"][gene][tissue][2]])
+
+            pathway_db.commit()
+            gene_num.update(i)
+
+        gene_num.finish()
+
+    if hpm:
+        protein_tsv_file.close()
+
+    if hpm:
+        print("Number of genes covered by protein expression data: {}{}".format(
+            len(exp["protein"]), protein_coverage), end=2*"\n")
+
+    pathway_db.close()
+
+    return None
+
+def parse_input_genes(
+        buffer_size,
+        gene_synonym_map_fp,
+        input_gene_map_fp,
+        input_genes,
+        input_files,
+        summary_files):
+
+    """"""
+    global gene_name
+    gene_name = GeneName(gene_synonym_map_fp)
+
+    if input_genes is None:
+        input_genes = []
+
+    if input_files:
+        for input_file in input_files:
+            with open(input_file, "r",
+                      buffering=buffer_size) as input_gene_file:
+                input_genes.extend([
+                    gene.strip() for gene in input_gene_file])
+
+    if summary_files:
+        for summary_file in summary_files:
+            with open(summary_file, "r", buffering=buffer_size) as summary:
+                summary_reader = csv.reader(summary, delimiter="\t")
+                next(summary_reader)
+                input_genes.extend([line[3] for line in summary_reader])
+
+    input_genes = [input_genes[i]
+                   for i in range(len(input_genes))
+                   if input_genes[i] and input_genes[i] not in input_genes[:i]]
+
+    print("Number of unique input genes: {}".format(len(input_genes)))
+
+    with open(input_gene_map_fp, "w", buffering=buffer_size) as gene_map:
+        gene_map_writer = csv.writer(gene_map, delimiter="\t",
+                                     lineterminator="\n")
+        gene_map_header = [
+            "Input_Gene_Name",
+            "Remapped_Gene_Name"]
+        gene_map_writer.writerow(gene_map_header)
+
+        genes = []
+        for i in range(len(input_genes)):
+            corrected_name = gene_name.correct(input_genes[i])
+
+            if corrected_name:
+
+                if input_genes[i] != corrected_name:
+                    gene_map_writer.writerow([
+                        input_genes[i],
+                        corrected_name])
+
+                if corrected_name not in genes:
+                    genes.append(corrected_name)
+
+    if input_genes:
+        coverage = " ({:.2f}%)".format((len(genes) / len(input_genes))*100)
+    else:
+        coverage = ""
+    print("Number of unique genes excluding synonyms: {}{}".format(
+          len(genes), coverage), end=2*"\n")
+
+    return sorted(genes)
+
+
+def build_pathway_tables(
+        db_fp,
+        log_fp,
+        pathway_tsv_fp,
+        genes):
+    """"""
+    logging.getLogger("requests").setLevel(logging.CRITICAL)
+    logging.basicConfig(
+        filename=log_fp,
+        filemode="w",
+        level=logging.ERROR,
+        format="%(levelname)s\t%(asctime)s\t%(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S")
+
+    wikipathways_release = get_wikipathways_release()
+    if wikipathways_release:
+        print("WikiPathways release: {}".format(wikipathways_release))
+    else:
+        print("WikiPathways release unavailable.")
+
+    tsv_file = open(pathway_tsv_fp, "w", buffering=1)
+    tsv_writer = csv.writer(tsv_file, delimiter="\t", lineterminator="\n")
+    tsv_header = ["Gene_A",
+                  "Pathway",
+                  "Pathway_Version",
+                  "Pathway_Name",
+                  "Gene_B",
+                  "Upstream",
+                  "Downstream",
+                  "Upregulating",
+                  "Downregulating",
+                  "Upregulated",
+                  "Downregulated"]
+    tsv_writer.writerow(tsv_header)
+
+
+    pathway_db = sqlite3.connect(db_fp)
+    pathway_db_cursor = pathway_db.cursor()
+
+    pathway_db_cursor.execute("""
+        DROP TABLE IF EXISTS
+            Pathways
+        """)
+    pathway_db_cursor.execute("""
+        DROP TABLE IF EXISTS
+            PathwayNames
+        """)
+    pathway_db_cursor.execute("""
+        DROP TABLE IF EXISTS
+            UpstreamGenes
+        """)
+    pathway_db_cursor.execute("""
+        DROP TABLE IF EXISTS
+            DownstreamGenes
+        """)
+
+    pathway_db_cursor.execute("""
+        CREATE TABLE
+            Pathways (
+                gene TEXT,
+                pathway TEXT,
+                PRIMARY KEY (
+                    gene,
+                    pathway)
+                ON CONFLICT IGNORE)
+        """)
+    pathway_db_cursor.execute("""
+        CREATE TABLE
+            PathwayNames (
+                pathway TEXT,
+                name TEXT,
+                PRIMARY KEY (
+                    pathway)
+                ON CONFLICT IGNORE)
+        """)
+    pathway_db_cursor.execute("""
+        CREATE TABLE
+            UpstreamGenes (
+                gene TEXT,
+                pathway TEXT,
+                upstream_gene TEXT,
+                upregulating INTEGER,
+                downregulating INTEGER,
+                PRIMARY KEY (
+                    gene,
+                    pathway,
+                    upstream_gene)
+                ON CONFLICT IGNORE)
+        """)
+    pathway_db_cursor.execute("""
+        CREATE TABLE
+            DownstreamGenes (
+                gene TEXT,
+                pathway TEXT,
+                downstream_gene TEXT,
+                upregulated INTEGER,
+                downregulated INTEGER,
+                PRIMARY KEY (
+                    gene,
+                    pathway,
+                    downstream_gene)
+                ON CONFLICT IGNORE)
+        """)
+
+    num_pathways_available = 0
+    all_up_down_stream_genes = set()
+
+    if genes:
+        print("Mapping pathway information...")
+        gene_num = progressbar.ProgressBar(max_value=len(genes))
+        gene_num.update(0)
+
+        for i, gene in enumerate(genes, 1):
+            unicode_gene = unicode(gene, "utf-8")
+            pathways = wikipathways(gene)
+            if pathways:
+                num_pathways_available += 1
+            for pathway in pathways:
+                pathway_db_cursor.execute("""
+                    INSERT INTO
+                        Pathways
+                    VALUES
+                        (?, ?)
+                    """, (unicode_gene, pathway[0]))
+
+                pathway_db_cursor.execute("""
+                    INSERT INTO
+                        PathwayNames
+                    VALUES
+                        (?, ?)
+                    """, (pathway[0], pathway[2]))
+
+                entries = [
+                    (unicode_gene, pathway[0], upstream_gene,
+                    int(pathway[3][upstream_gene][0]),
+                    int(pathway[3][upstream_gene][1]))
+                    for upstream_gene in pathway[3]]
+
+                for entry in entries:
+                    pathway_db_cursor.execute("""
+                        INSERT INTO
+                            UpstreamGenes
+                        VALUES
+                            (?, ?, ?, ?, ?)
+                        """, entry)
+
+                entries = [
+                    (unicode_gene, pathway[0], downstream_gene,
+                    int(pathway[4][downstream_gene][0]),
+                    int(pathway[4][downstream_gene][1]))
+                    for downstream_gene in pathway[4]]
+
+                for entry in entries:
+                    pathway_db_cursor.execute("""
+                        INSERT INTO
+                            DownstreamGenes
+                        VALUES
+                            (?, ?, ?, ?, ?)
+                        """, entry)
+
+                up_down_stream_genes = set(pathway[3]) | set(pathway[4])
+
+                tsv_row = [entry.encode("utf-8") for entry in pathway[:3]]
+
+                if not up_down_stream_genes:
+                    tsv_rows = [[
+                        gene,
+                        tsv_row[0],
+                        tsv_row[1],
+                        tsv_row[2]]]
+                    tsv_rows[0].extend(["NA" for j in range(7)])
+
+                else:
+                    tsv_rows = [
+                        [gene,
+                        tsv_row[0],
+                        tsv_row[1],
+                        tsv_row[2],
+                        up_down_stream_gene.encode("utf-8"),
+                        up_down_stream_gene in pathway[3],
+                        up_down_stream_gene in pathway[4],
+                        (up_down_stream_gene in pathway[3] and
+                            pathway[3][up_down_stream_gene][0]),
+                        (up_down_stream_gene in pathway[3] and
+                            pathway[3][up_down_stream_gene][1]),
+                        (up_down_stream_gene in pathway[4] and
+                            pathway[4][up_down_stream_gene][0]),
+                        (up_down_stream_gene in pathway[4] and
+                            pathway[4][up_down_stream_gene][1])]
+                        for up_down_stream_gene
+                            in sorted(up_down_stream_genes)]
+
+                for tsv_row in tsv_rows:
+                    tsv_writer.writerow(tsv_row)
+
+                all_up_down_stream_genes |= up_down_stream_genes
+
+            pathway_db.commit()
+            gene_num.update(i)
+
+        gene_num.finish()
+    logging.shutdown()
+    tsv_file.close()
+
+    if genes:
+        coverage = " ({:.2f}%)".format(
+                (num_pathways_available / len(genes))*100)
+    else:
+        coverage = ""
+    print("Number of genes covered by pathway data: {}{}".format(
+        num_pathways_available, coverage))
+
+    pathway_db.close()
+
+    return None
+
+def merge_gtex_hpm(gene_exp, protein_exp):
+    """"""
+    tissue_map = {
+        "Adipose_Subcutaneous": None,
+        "Adipose_Visceral_Omentum": None,
+        "Adrenal_Gland": "Adrenal",
+        "Artery_Aorta": None,
+        "Artery_Coronary": None,
+        "Artery_Tibial": None,
+        "Bladder": "Urinary_Bladder",
+        "Brain_Amygdala": None,
+        "Brain_Anterior_cingulate_cortex_BA24": None,
+        "Brain_Caudate_basal_ganglia": None,
+        "Brain_Cerebellar_Hemisphere": None,
+        "Brain_Cerebellum": None,
+        "Brain_Cortex": None,
+        "Brain_Frontal_Cortex_BA9": "Frontal_Cortex",
+        "Brain_Hippocampus": None,
+        "Brain_Hypothalamus": None,
+        "Brain_Nucleus_accumbens_basal_ganglia": None,
+        "Brain_Putamen_basal_ganglia": None,
+        "Brain_Spinal_cord_cervical_c-1": "Spinal_Cord",
+        "Brain_Substantia_nigra": None,
+        "Breast_Mammary_Tissue": None,
+        "Cells_EBV-transformed_lymphocytes": None,
+        "Cells_Transformed_fibroblasts": None,
+        "Cervix_Ectocervix": None,
+        "Cervix_Endocervix": None,
+        "Colon_Sigmoid": "Colon",
+        "Colon_Transverse": "Colon",
+        "Esophagus_Gastroesophageal_Junction": "Esophagus",
+        "Esophagus_Mucosa": "Esophagus",
+        "Esophagus_Muscularis": "Esophagus",
+        "Fallopian_Tube": None,
+        "Heart_Atrial_Appendage": "Heart",
+        "Heart_Left_Ventricle": "Heart",
+        "Kidney_Cortex": "Kidney",
+        "Liver": "Liver",
+        "Lung": "Lung",
+        "Minor_Salivary_Gland": None,
+        "Muscle_Skeletal": None,
+        "Nerve_Tibial": None,
+        "Ovary": "Ovary",
+        "Pancreas": "Pancreas",
+        "Pituitary": None,
+        "Prostate": "Prostate",
+        "Skin_Not_Sun_Exposed_Suprapubic": None,
+        "Skin_Sun_Exposed_Lower_leg": None,
+        "Small_Intestine_Terminal_Ileum": None,
+        "Spleen": None,
+        "Stomach": None,
+        "Testis": "Testis",
+        "Thyroid": None,
+        "Uterus": None,
+        "Vagina": None,
+        "Whole_Blood": None
+        }
+
+    """
+    Unmapped HPM tissues:
+        Gallbladder
+        Rectum
+        Retina
+    """
+
+    exp = {"gene": {},
+           "protein": {}}
+
+    for gene in gene_exp:
+        for tissue in tissue_map:
+            if tissue_map[tissue] is not None:
+                if tissue in gene_exp[gene]:
+                    if gene not in exp["gene"]:
+                        exp["gene"][gene] = {}
+                    exp["gene"][gene][tissue] = gene_exp[gene][tissue]
+
+    for gene in protein_exp:
+        for tissue in tissue_map:
+            if tissue_map[tissue] is not None:
+                if tissue_map[tissue] in protein_exp[gene]:
+                    if gene not in exp["protein"]:
+                        exp["protein"][gene] = {}
+                    exp["protein"][gene][tissue] =\
+                            protein_exp[gene][tissue_map[tissue]]
+
+    return exp
+
+def produce_pathway_summary(
+        buffer_size,
+        db_fp,
+        summary_fp,
+        hpm,
+        input_genes):
+
+    pathway_db = sqlite3.connect(db_fp)
+    pathway_db.text_factory = str
+    pathway_db_cursor = pathway_db.cursor()
+
+    up_down_stream_genes = set()
+    pathways = {}
+    genes = set(input_genes)
+    for gene in input_genes:
+        pathways[gene] = {}
+        for (pathway, upstream_gene, upregulating,
+             downregulating) in pathway_db_cursor.execute("""
+                    SELECT
+                        pathway,
+                        upstream_gene,
+                        upregulating,
+                        downregulating
+                    FROM
+                        UpstreamGenes
+                    WHERE
+                        gene = ?
+                    """, (gene,)):
+            if pathway not in pathways[gene]:
+                pathways[gene][pathway] = {
+                    "upstream": {},
+                    "downstream": {}}
+            pathways[gene][pathway]["upstream"][upstream_gene] = [
+                    bool(upregulating),
+                    bool(downregulating)]
+            genes.add(upstream_gene)
+
+        for (pathway, downstream_gene, upregulated,
+             downregulated) in pathway_db_cursor.execute("""
+                    SELECT
+                        pathway,
+                        downstream_gene,
+                        upregulated,
+                        downregulated
+                    FROM
+                        DownstreamGenes
+                    WHERE
+                        gene = ?
+                    """, (gene,)):
+            if pathway not in pathways[gene]:
+                pathways[gene][pathway] = {
+                    "upstream": {},
+                    "downstream": {}}
+            pathways[gene][pathway]["downstream"][downstream_gene] = [
+                    bool(upregulated),
+                    bool(downregulated)]
+            genes.add(downstream_gene)
+
+    tissues = set()
+    exp = {}
+    for gene in genes:
+        exp[gene] = {}
+        for (tissue, gene_exp, gene_exp_z, gene_exp_p
+            ) in pathway_db_cursor.execute("""
+                SELECT
+                    tissue,
+                    gene_exp,
+                    gene_exp_z,
+                    gene_exp_p
+                FROM
+                    GeneExpression
+                WHERE
+                   gene = ?
+                """, (gene,)):
+            tissues.add(tissue)
+            exp[gene][tissue] = [(gene_exp, gene_exp_z, gene_exp_p)]
+
+    if hpm:
+        for gene in genes:
+            for (tissue, protein_exp, protein_exp_z, protein_exp_p
+                ) in pathway_db_cursor.execute("""
+                    SELECT
+                        tissue,
+                        protein_exp,
+                        protein_exp_z,
+                        protein_exp_p
+                    FROM
+                        ProteinExpression
+                    WHERE
+                        gene = ?
+                    """, (gene,)):
+                exp[gene][tissue].append(
+                        (protein_exp, protein_exp_z, protein_exp_p))
+
+
+    pathway_db.close()
+
+    tissues = sorted(tissues)
+
+    summary_file = open(summary_fp, "w", buffering=buffer_size)
+    summary_writer = csv.writer(summary_file, delimiter="\t",
+                                lineterminator="\n")
+    summary_header = [
+        "Gene_A",
+        "Pathway",
+        "Gene_B",
+        "Upstream",
+        "Downstream",
+        "Upregulating",
+        "Downregulating",
+        "Upregulated",
+        "Downregulated",
+        "Tissue",
+        "Gene_A_Gene_Expression",
+        "Gene_A_Gene_Expression_z-Score",
+        "Gene_A_Gene_Expression_p-Value",
+        "Gene_B_Gene_Expression",
+        "Gene_B_Gene_Expression_z-Score",
+        "Gene_B_Gene_Expression_p-Value"]
+
+    if hpm:
+        summary_header.insert(13, "Gene_A_Protein_Expression")
+        summary_header.insert(14, "Gene_A_Protein_Expression_z-Score")
+        summary_header.insert(15, "Gene_A_Protein_Expression_p-Value")
+        summary_header.extend([
+            "Gene_B_Protein_Expression",
+            "Gene_B_Protein_Expression_z-Score",
+            "Gene_B_Protein_Expression_p-Value"])
+
+    summary_writer.writerow(summary_header)
+
+    num_rows = 0
+    for gene in input_genes:
+        if not pathways[gene]:
+            for tissue in tissues:
+                num_rows += 1
+        for pathway in pathways[gene]:
+            up_down_stream_genes = set(itertools.chain.from_iterable(
+                pathways[gene][pathway].values()))
+            for up_down_stream_gene in up_down_stream_genes:
+                    for tissue in tissues:
+                            num_rows += 1
+    if num_rows:
+        print("Writing summary file...")
+        row_num = progressbar.ProgressBar(max_value=num_rows)
+        row_num.update(0)
+
+        current_row = 0
+        for gene in input_genes:
+            if not pathways[gene]:
+                for tissue in tissues:
+                    to_file = [
+                        gene]
+                    to_file.extend(["NA" for i in range(12)])
+                    to_file.append(tissue)
+
+                    to_file.extend([
+                        exp[gene][tissue][0][i]
+                        if exp[gene] and exp[gene][tissue][0][i] else "NA"
+                            for i in range(3)])
+
+                    if hpm:
+                        to_file.extend([
+                            exp[gene][tissue][1][i]
+                            if exp[gene] and exp[gene][tissue][1][i] else "NA"
+                                for i in range(3)])
+
+                    to_file.extend(["NA" for i in range(6)])
+
+                    summary_writer.writerow(to_file)
+
+                    current_row += 1
+                    row_num.update(current_row)
+
+            for pathway in sorted(pathways[gene],
+                    key=lambda pathway: int(
+                        "".join([char for char in pathway
+                            if char.isdigit()]))):
+                up_down_stream_genes = set(itertools.chain.from_iterable(
+                    pathways[gene][pathway].values()))
+
+                for up_down_stream_gene in sorted(up_down_stream_genes):
+                    for tissue in tissues:
+                        to_file = [
+                            gene,
+                            pathway,
+                            up_down_stream_gene,
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "upstream"],
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "downstream"],
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "upstream"] and
+                            pathways[gene][pathway]["upstream"][
+                                up_down_stream_gene][0],
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "upstream"] and
+                            pathways[gene][pathway]["upstream"][
+                                up_down_stream_gene][1],
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "downstream"] and
+                            pathways[gene][pathway]["downstream"][
+                                up_down_stream_gene][0],
+                            up_down_stream_gene in pathways[gene][pathway][
+                                "downstream"] and
+                            pathways[gene][pathway]["downstream"][
+                                up_down_stream_gene][1],
+                            tissue]
+
+                        to_file.extend([
+                            exp[gene][tissue][0][i]
+                            if exp[gene] and exp[gene][tissue][0][i] else "NA"
+                                for i in range(3)])
+
+                        if hpm:
+                            to_file.extend([
+                                exp[gene][tissue][1][i]
+                                if exp[gene] and exp[gene][tissue][1][i] else "NA"
+                                    for i in range(3)])
+
+                        to_file.extend([
+                            exp[up_down_stream_gene][tissue][0][i]
+                            if (exp[up_down_stream_gene] and
+                            exp[up_down_stream_gene][tissue][0][i]) else "NA"
+                                for i in range(3)])
+
+                        if hpm:
+                            to_file.extend([
+                                exp[up_down_stream_gene][tissue][1][i]
+                                if (exp[up_down_stream_gene] and
+                                exp[up_down_stream_gene][tissue][1][i]) else "NA"
+                                    for i in range(3)])
+
+                        summary_writer.writerow(to_file)
+
+                        current_row += 1
+                        row_num.update(current_row)
+
+        row_num.finish()
+        print()
+    summary_file.close()
+
+    return None
+
+def cluster_genes(tissues, genes, expr, position):
+    if len(genes) < 3:
+        return genes
+
+    no_expression = []
+    no_data = []
+    j = 0
+    for i in range(len(genes)):
+        if not any(expr[genes[i-j]].values()):
+            if None in expr[genes[i-j]].values():
+                no_data.append(genes.pop(i-j))
+            else:
+                no_expression.append(genes.pop(i-j))
+            j += 1
+
+    if position:
+        no_data.extend(no_expression)
+        exclude = no_data
+    else:
+        no_expression.extend(no_data)
+        exclude = no_expression
+
+    distr = {gene: np.array([expr[gene][tissue] for tissue in tissues])
+             for gene in genes}
+    dist_mat = np.nan_to_num(np.array([[abs(st.spearmanr(
+                             distr[genes[i]], distr[genes[j]])[0])
+                      if j < i else np.nan
+                      for j in range(len(genes))]
+                      for i in range(len(genes))]))
+    link_mat = cl.hierarchy.linkage(dist_mat, "complete",
+                                    optimal_ordering=True)
+
+    genes = [genes[i] for i in cl.hierarchy.leaves_list(link_mat)]
+    if position:
+        exclude.extend(genes)
+        return exclude
+    else:
+        genes.extend(exclude)
+        return genes
+
+def plot_heatmaps(
+        db_fp,
+        input_genes,
+        plot_dir_z,
+        plot_dir_p,
+        hpm,
+        p_value,
+        numbers):
+    """"""
+    font = {"size": 8}
+
+    matplotlib.rc("font", **font)
+
+    pathway_db = sqlite3.connect(db_fp)
+    pathway_db.text_factory = str
+    pathway_db_cursor = pathway_db.cursor()
+
+    genes = {}
+    all_genes = set(input_genes)
+    for gene in input_genes:
+        genes[gene] = {}
+        for (upstream_gene, upregulating,
+             downregulating) in pathway_db_cursor.execute("""
+                    SELECT
+                        upstream_gene,
+                        upregulating,
+                        downregulating
+                    FROM
+                        UpstreamGenes
+                    WHERE
+                        gene = ?
+                    """, (gene,)):
+            if upstream_gene not in genes[gene]:
+                genes[gene][upstream_gene] = [
+                        True,
+                        False,
+                        bool(upregulating),
+                        bool(downregulating),
+                        False,
+                        False]
+            else:
+                genes[gene][upstream_gene][0] = True
+                genes[gene][upstream_gene][2] = bool(upregulating)
+                genes[gene][upstream_gene][3] = bool(downregulating)
+            all_genes.add(upstream_gene)
+
+        for (downstream_gene, upregulated,
+             downregulated) in pathway_db_cursor.execute("""
+                    SELECT
+                        downstream_gene,
+                        upregulated,
+                        downregulated
+                    FROM
+                        DownstreamGenes
+                    WHERE
+                        gene = ?
+                    """, (gene,)):
+            if downstream_gene not in genes[gene]:
+                genes[gene][downstream_gene] = [
+                        False,
+                        True,
+                        False,
+                        False,
+                        bool(upregulated),
+                        bool(downregulated)]
+            else:
+                genes[gene][downstream_gene][1] = True
+                genes[gene][downstream_gene][4] = bool(upregulated)
+                genes[gene][downstream_gene][5] = bool(downregulated)
+            all_genes.add(downstream_gene)
+
+    expr = {}
+    for gene in all_genes:
+        expr[gene] = {}
+        for (tissue, gene_exp_z, gene_exp_p)in pathway_db_cursor.execute("""
+                SELECT
+                    tissue,
+                    gene_exp_z,
+                    gene_exp_p
+                FROM
+                    GeneExpression
+                WHERE
+                    gene = ?
+                """, (gene,)):
+
+            expr[gene][tissue] = [(gene_exp_z, gene_exp_p)]
+
+    if hpm:
+        for gene in all_genes:
+            for (tissue, protein_exp_z, protein_exp_p
+                ) in pathway_db_cursor.execute("""
+                    SELECT
+                        tissue,
+                        protein_exp_z,
+                        protein_exp_p
+                    FROM
+                        ProteinExpression
+                    WHERE
+                        gene = ?
+                    """, (gene,)):
+
+                expr[gene][tissue].append((protein_exp_z, protein_exp_p))
+
+    tissues = sorted([tissue for (tissue,) in pathway_db_cursor.execute("""
+                SELECT DISTINCT
+                    tissue
+                FROM
+                    GeneExpression
+                """)])
+
+    pathway_db.close()
+
+    if genes:
+        print("Plotting gene expression heatmaps...")
+        gene_num = progressbar.ProgressBar(max_value=len(genes))
+        gene_num.update(0)
+
+        for i, gene_a in enumerate(genes, 1):
+            interacting_genes = sorted([gene_b for gene_b in genes[gene_a]])
+
+            upstream_genes = [
+                gene_b for gene_b in interacting_genes
+                if genes[gene_a][gene_b][0]]
+
+
+            if upstream_genes:
+                upstream_expr_gene = {gene: {tissue: expr[gene][tissue][0][0]
+                                            if expr[gene] else None
+                                            for tissue in tissues}
+                                        for gene in upstream_genes}
+                if hpm:
+                    upstream_expr_protein = {gene: {tissue:
+                                                expr[gene][tissue][1][0]
+                                                if expr[gene] else None
+                                                for tissue in tissues}
+                                            for gene in upstream_genes}
+
+                upstream_genes_gene = cluster_genes(tissues, upstream_genes,
+                                            upstream_expr_gene,
+                                            True)
+                if hpm:
+                    upstream_genes_protein = cluster_genes(tissues, upstream_genes,
+                                                upstream_expr_protein,
+                                                True)
+
+                upstream_reg_type_data = np.array(
+                    [[float(genes[gene_a][gene_b][2])
+                    if genes[gene_a][gene_b][2] != genes[gene_a][gene_b][3]
+                    else 0.5]
+                    for gene_b in upstream_genes_gene])
+
+            downstream_genes = [
+                gene_b for gene_b in interacting_genes
+                if genes[gene_a][gene_b][1]]
+
+            if downstream_genes:
+                downstream_expr_gene = {gene:
+                                            {tissue: expr[gene][tissue][0][0]
+                                            if expr[gene] else None
+                                            for tissue in tissues}
+                                        for gene in downstream_genes}
+                if hpm:
+                    downstream_expr_protein = {gene:
+                                                {tissue: expr[gene][tissue][0][1]
+                                                if expr[gene] else None
+                                                for tissue in tissues}
+                                            for gene in downstream_genes}
+
+                downstream_genes_gene = cluster_genes(tissues,
+                                                      downstream_genes,
+                                                      downstream_expr_gene,
+                                                      False)
+
+                if hpm:
+                    downstream_genes_protein = cluster_genes(tissues,
+                                                            downstream_genes,
+                                                        downstream_expr_protein,
+                                                        False)
+
+                downstream_reg_type_data = np.array(
+                    [[float(genes[gene_a][gene_b][4])
+                    if genes[gene_a][gene_b][4] != genes[gene_a][gene_b][5]
+                    else 0.5]
+                    for gene_b in downstream_genes])
+
+
+            for (j, rmin, rmax, cmap, plot_dir, label) in (
+                (0, st.norm.ppf(0.5*p_value), -st.norm.ppf(0.5*p_value),
+                 "RdBu_r", plot_dir_z, "z-Score"),
+                (1, p_value, 0.5, "Reds_r", plot_dir_p, "p-Value")):
+
+                gene_reg_type_data = np.array([[0.5]])
+
+                gene_gene_data = np.array(
+                    [[expr[gene_a][tissue][0][j]
+                      if (expr[gene_a] and
+                          expr[gene_a][tissue][0][j] is not None)
+                      else np.nan
+                    for tissue in tissues]])
+
+                if hpm:
+                    gene_protein_data = np.array(
+                        [[expr[gene_a][tissue][1][j]
+                        if (expr[gene_a] and
+                            expr[gene_a][tissue][1][j] is not None)
+                        else np.nan
+                        for tissue in tissues]])
+
+                scale = 0.5
+                if hpm:
+                    fig = plt.figure(figsize=(scale*(len(tissues)+2),
+                        scale*(2+2*(len(upstream_genes)+len(downstream_genes)))))
+                else:
+                    fig = plt.figure(figsize=(scale*(len(tissues)+2),
+                        scale*(1+len(upstream_genes)+len(downstream_genes))))
+
+                if hpm:
+                    gs = gridspec.GridSpec(3, 1, hspace=1/(1+len(upstream_genes) +
+                                        len(downstream_genes)),
+                                        height_ratios=[
+                                            (1+len(upstream_genes)+
+                                                len(downstream_genes)),
+                                            (1+len(upstream_genes)+
+                                                len(downstream_genes)),
+                                            1])
+
+                else:
+                    gs = gridspec.GridSpec(2, 1, hspace=1/(1+len(upstream_genes) +
+                                        len(downstream_genes)),
+                                        height_ratios=[
+                                            (1+len(upstream_genes)+
+                                                len(downstream_genes)),
+                                            1])
+
+
+                gs1 = gridspec.GridSpecFromSubplotSpec(3, 2,
+                        subplot_spec=gs[0],
+                        width_ratios=[1, len(tissues)],
+                        height_ratios=[len(upstream_genes), 1,
+                            len(downstream_genes)],
+                       wspace=1/(2+2*(len(upstream_genes) +
+                                len(downstream_genes))),
+                       hspace=1/(2+2*(len(upstream_genes) +
+                                len(downstream_genes))))
+
+                if hpm:
+                    gs2 = gridspec.GridSpecFromSubplotSpec(3, 2,
+                            subplot_spec=gs[1],
+                            width_ratios=[1, len(tissues)],
+                            height_ratios=[len(upstream_genes), 1,
+                                len(downstream_genes)],
+                        wspace=1/(2+2*(len(upstream_genes) +
+                                    len(downstream_genes))),
+                        hspace=1/(2+2*(len(upstream_genes) +
+                                    len(downstream_genes))))
+                if hpm:
+                    gs3 = gridspec.GridSpecFromSubplotSpec(1, 2,
+                            subplot_spec=gs[2],
+                            width_ratios=[1+len(tissues)-10, 10],
+                        wspace=1/(2+2*(len(upstream_genes) +
+                                    len(downstream_genes))),
+                        hspace=1/(2+2*(len(upstream_genes) +
+                                    len(downstream_genes))))
+                else:
+                    gs3 = gridspec.GridSpecFromSubplotSpec(1, 2,
+                            subplot_spec=gs[1],
+                            width_ratios=[1+len(tissues)-10, 10],
+                        wspace=1/(2+2*(len(upstream_genes) +
+                                    len(downstream_genes))),
+                        hspace=1/(2+2*(len(upstream_genes) +
+                                    len(downstream_genes))))
+
+                cbar_ax = plt.subplot(gs3[1])
+                leg_ax = plt.subplot(gs3[0])
+
+                custom_patches = [
+                 Patch(facecolor="black", edgecolor="black",
+                       label="Upregulatory Protein Interaction"),
+                 Patch(facecolor="grey", edgecolor="black",
+                       label="Not Applicable or Contradictory Data"),
+                 Patch(facecolor="white", edgecolor="black",
+                       label="Downregulatory Protein Interaction")]
+
+                leg_ax.legend(handles=custom_patches, loc="center left",
+                              frameon=False, mode="expand")
+                leg_ax.axis("off")
+
+                gene_gene_reg = plt.subplot(gs1[2])
+                gene_gene = plt.subplot(gs1[3])
+
+                if hpm:
+                    gene_protein_reg = plt.subplot(gs2[2])
+                    gene_protein = plt.subplot(gs2[3])
+
+                expr_plots = [gene_gene]
+
+                if hpm:
+                    expr_plots.append(gene_protein)
+
+                reg_plots = [gene_gene_reg]
+
+                if hpm:
+                    reg_plots.append(gene_protein_reg)
+
+                plot_data = {
+                        gene_gene_reg: gene_reg_type_data,
+                        gene_gene: gene_gene_data}
+
+                if hpm:
+                    plot_data[gene_protein_reg] = gene_reg_type_data
+                    plot_data[gene_protein] = gene_protein_data
+
+                plot_labels = {
+                        gene_gene_reg: [gene_a],
+                        gene_gene: []}
+
+                if hpm:
+                    plot_labels[gene_protein_reg] = [gene_a]
+                    plot_labels[gene_protein] = []
+
+                if upstream_genes:
+                    upstream_gene_gene_data = np.array(
+                        [[expr[gene_b][tissue][0][j]
+                          if (expr[gene_b] and
+                              expr[gene_b][tissue][0][j] is not None)
+                          else np.nan
+                        for tissue in tissues]
+                        for gene_b in upstream_genes_gene])
+
+                    if hpm:
+                        upstream_gene_protein_data = np.array(
+                            [[expr[gene_b][tissue][1][j]
+                            if (expr[gene_b] and
+                                expr[gene_b][tissue][1][j] is not None)
+                            else np.nan
+                            for tissue in tissues]
+                            for gene_b in upstream_genes_protein])
+
+                    upstream_gene_gene_reg = plt.subplot(gs1[0])
+                    upstream_gene_gene = plt.subplot(gs1[1])
+
+                    if hpm:
+                        upstream_gene_protein_reg = plt.subplot(gs2[0])
+                        upstream_gene_protein = plt.subplot(gs2[1])
+
+                    expr_plots.append(upstream_gene_gene)
+                    if hpm:
+                        expr_plots.append(upstream_gene_protein)
+
+                    reg_plots.append(upstream_gene_gene_reg)
+                    if hpm:
+                        reg_plots.append(upstream_gene_protein_reg)
+
+                    plot_data[upstream_gene_gene] = upstream_gene_gene_data
+                    plot_data[upstream_gene_gene_reg] = upstream_reg_type_data
+                    if hpm:
+                        plot_data[upstream_gene_protein] =\
+                                upstream_gene_protein_data
+                        plot_data[upstream_gene_protein_reg] =\
+                                upstream_reg_type_data
+
+                    plot_labels[upstream_gene_gene_reg] = upstream_genes_gene
+                    if hpm:
+                        plot_labels[upstream_gene_protein_reg] =\
+                                upstream_genes_protein
+
+                if downstream_genes:
+                    downstream_gene_gene_data = np.array(
+                        [[expr[gene_b][tissue][0][j]
+                          if (expr[gene_b] and
+                              expr[gene_b][tissue][0][j] is not None)
+                          else np.nan
+                        for tissue in tissues]
+                        for gene_b in downstream_genes_gene])
+
+                    if hpm:
+                        downstream_gene_protein_data = np.array(
+                            [[expr[gene_b][tissue][1][j]
+                            if (expr[gene_b] and
+                                expr[gene_b][tissue][1][j] is not None)
+                            else np.nan
+                            for tissue in tissues]
+                            for gene_b in downstream_genes_protein])
+
+                    downstream_gene_gene_reg = plt.subplot(gs1[4])
+                    downstream_gene_gene = plt.subplot(gs1[5])
+                    if hpm:
+                        downstream_gene_protein_reg = plt.subplot(gs2[4])
+                        downstream_gene_protein = plt.subplot(gs2[5])
+
+                    expr_plots.append(downstream_gene_gene)
+                    if hpm:
+                        expr_plots.append(downstream_gene_protein)
+
+                    reg_plots.append(downstream_gene_gene_reg)
+                    if hpm:
+                        reg_plots.append(downstream_gene_protein_reg)
+
+                    plot_data[downstream_gene_gene] =\
+                            downstream_gene_gene_data
+                    plot_data[downstream_gene_gene_reg] =\
+                            downstream_reg_type_data
+                    if hpm:
+                        plot_data[downstream_gene_protein] =\
+                                downstream_gene_protein_data
+                        plot_data[downstream_gene_protein_reg] =\
+                                downstream_reg_type_data
+
+                    plot_labels[downstream_gene_gene_reg] =\
+                            downstream_genes_gene
+                    if hpm:
+                        plot_labels[downstream_gene_protein_reg] =\
+                                downstream_genes_protein
+
+                for plot in expr_plots:
+                    plot_data[plot] = np.ma.masked_invalid(plot_data[plot])
+                    im = plot.imshow(plot_data[plot], aspect="auto",
+                                     vmin=rmin, vmax=rmax, cmap=cmap)
+
+                    plot.set_xticks([])
+                    plot.set_xticklabels([])
+                    plot.set_yticks([])
+                    plot.set_yticklabels([])
+
+                    if numbers:
+                        for j in range(np.ma.size(plot_data[plot], 0)):
+                            for k in range(len(tissues)):
+                                text = plot.text(k, j,
+                                    "{:.2f}".format(plot_data[plot][j, k]),
+                                    ha="center", va="center", color="black")
+
+                cbar = plt.colorbar(im, ax=expr_plots, cax=cbar_ax,
+                        orientation="horizontal")
+                cbar.set_label(
+                        "Standardized Expression Rate ({})".format(label))
+
+                for plot in reg_plots:
+                    im = plot.imshow(plot_data[plot], aspect="auto", vmin=0.0,
+                                    vmax=1.0, cmap="binary")
+
+                    plot.set_xticks([])
+                    plot.set_xticklabels([])
+                    plot.set_yticks(np.arange(len(plot_labels[plot])))
+                    plot.tick_params(length=0.0)
+                    plot.set_yticklabels(plot_labels[plot])
+
+                if upstream_genes:
+                    upstream_gene_gene.set_xticks(np.arange(len(tissues)))
+                    upstream_gene_gene.tick_params(length=0, top=True,
+                            bottom=False, labeltop=True, labelbottom=False)
+                    upstream_gene_gene.set_xticklabels([
+                        tissue.replace("_", " ") for tissue in tissues])
+                    plt.setp(upstream_gene_gene.get_xticklabels(),
+                            rotation=-90, ha="right", rotation_mode="anchor")
+
+                else:
+                    gene_gene.set_xticks(np.arange(len(tissues)))
+                    gene_gene.tick_params(length=0)
+                    gene_gene.set_xticklabels([
+                        tissue.replace("_", " ") for tissue in tissues])
+                    gene_gene.tick_params(length=0, top=True,
+                            bottom=False, labeltop=True, labelbottom=False)
+                    plt.setp(gene_gene.get_xticklabels(),
+                            rotation=-90, ha="right", rotation_mode="anchor")
+
+                plt.savefig(os.path.join(plot_dir, "{}.png".format(gene_a)),
+                            format="png", dpi=300, bbox_inches="tight")
+
+            plt.close(fig)
+            gene_num.update(i)
+        gene_num.finish()
+    return None
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="")
     parser.add_argument("-i", "--inputs", nargs='+', required=True,
@@ -2135,21 +4180,36 @@ if __name__ == "__main__":
     parser.add_argument("-r", "--restriction_enzymes", nargs='+',
                         help="Space-separated list of  " +\
                         "restriction enzymes used in HiC data.")
-    parser.add_argument("-b","--buffer_size_in",type=int,default=1048576,
-                        help="Buffer size applied to file input during " +\
+    parser.add_argument("-b","--buffer_size",type=int,default=1048576,
+                        help="Buffer size applied to file I/O during " +\
                         "compilation (default: 1048576).")
-    parser.add_argument("-z","--buffer_size_out",type=int,default=1048576,
-                        help="Buffer size applied to file output during " +\
-                        "compilation (default: 1048576).")
-    parser.add_argument("-t", "--num_processes_summary", type=int,
-                        default=min(psutil.cpu_count(), 32),
+    parser.add_argument("-k", "--num_processes_summary", type=int,
+                        default=(psutil.cpu_count() // 2),
                         help="The number of processes for compilation of " +\
                         "the results (default: %s)." %
-                        str(min(psutil.cpu_count(), 32)))
+                        str((psutil.cpu_count() // 2)))
+    parser.add_argument("--pathway_config",
+                        default=os.path.join(
+                        os.path.dirname(__file__),
+                        "../docs/codes3d_pathway.conf"),
+                        help="Configuration file to be used.")
+    parser.add_argument("--hpm", action="store_true", default=False,
+                        help="Include protein expression data")
+    parser.add_argument("--numbers", action="store_true", default=False,
+                        help="Label the heatmap entries with the " +\
+                        "represented value.")
+    parser.add_argument("--p_value", type=float, default=0.05,
+                        help="p-value defining the range of the heatmap " +\
+                        "gradient")
+    parser.add_argument("--summary_files", nargs="+",
+                        help="List of summary files")
+
     args = parser.parse_args()
     config = configparser.ConfigParser()
     config.read(args.config)
-    lib_dir = os.path.join(os.path.dirname(__file__),config.get("Defaults", "LIB_DIR"))
+
+    lib_dir = os.path.join(os.path.dirname(__file__),config.get("Defaults",
+                                                                "LIB_DIR"))
     snp_database_fp = os.path.join(os.path.dirname(__file__),
                                    config.get("Defaults", "SNP_DATABASE_FP"))
     hic_data_dir = os.path.join(os.path.dirname(__file__),
@@ -2157,7 +4217,8 @@ if __name__ == "__main__":
     fragment_bed_fp = os.path.join(os.path.dirname(__file__),
                                    config.get("Defaults", "FRAGMENT_BED_FP"))
     fragment_database_fp = os.path.join(os.path.dirname(__file__),
-                                        config.get("Defaults", "FRAGMENT_DATABASE_FP"))
+                                        config.get("Defaults",
+                                                   "FRAGMENT_DATABASE_FP"))
     gene_bed_fp = os.path.join(os.path.dirname(__file__),
                                config.get("Defaults", "GENE_BED_FP"))
     gene_database_fp = os.path.join(os.path.dirname(__file__),
@@ -2165,7 +4226,8 @@ if __name__ == "__main__":
     eqtl_data_dir = os.path.join(os.path.dirname(__file__),
                                  config.get("Defaults", "EQTL_DATA_DIR"))
     expression_table_fp = os.path.join(os.path.dirname(__file__),
-                                       config.get("Defaults", "EXPRESSION_TABLE_FP"))
+                                       config.get("Defaults",
+                                                  "EXPRESSION_TABLE_FP"))
     gene_dict_fp = os.path.join(os.path.dirname(__file__),
                                        config.get("Defaults", "GENE_DICT_FP"))
     snp_dict_fp = os.path.join(os.path.dirname(__file__),
@@ -2173,13 +4235,82 @@ if __name__ == "__main__":
     GTEX_CERT = os.path.join(os.path.dirname(__file__),
                              config.get("Defaults", "GTEX_CERT"))
     HIC_RESTRICTION_ENZYMES = [e.strip() for e in \
-                                config.get("Defaults", "HIC_RESTRICTION_ENZYMES").split(',')]
+                                config.get("Defaults",
+                                    "HIC_RESTRICTION_ENZYMES").split(',')]
     restriction_enzymes, include_cell_lines, exclude_cell_lines =\
         parse_parameters(args.restriction_enzymes, \
                          args.include_cell_lines, \
                          args.exclude_cell_lines)
+
+    pathway_config = configparser.ConfigParser()
+    pathway_config.read(args.pathway_config)
+
+    gene_synonym_map_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("LIB", "gene_synonym_map_fp"))
+
+    hpm_gene_exp_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("LIB", "hpm_gene_exp_fp"))
+
+    hpm_map_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("LIB", "hpm_map_fp"))
+
+    hpm_protein_exp_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("LIB", "hpm_protein_exp_fp"))
+
+    input_gene_map_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "input_gene_map_fp"))
+
+    log_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "log_fp"))
+
+    db_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "db_fp"))
+
+    pathway_tsv_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "pathway_tsv_fp"))
+
+    gene_exp_tsv_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "gene_exp_tsv_fp"))
+
+    protein_exp_tsv_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "protein_exp_tsv_fp"))
+
+    summary_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "summary_fp"))
+
+    plot_dir = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "plot_dir"))
+
+    plot_dir_z = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "plot_dir_z"))
+
+    plot_dir_p = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "plot_dir_p"))
+
+    out_dir = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "out_dir"))
+
     if not os.path.isdir(args.output_dir):
         os.makedirs(args.output_dir)
+
+    heatmap_dir = os.path.join(args.output_dir,
+            os.path.basename(os.path.normpath(plot_dir)))
+
+    if not os.path.isdir(heatmap_dir):
+        os.mkdir(heatmap_dir)
+
+    plot_dir_z = os.path.join(heatmap_dir,
+                            os.path.basename(os.path.normpath(plot_dir_z)))
+    plot_dir_p = os.path.join(heatmap_dir,
+                            os.path.basename(os.path.normpath(plot_dir_p)))
+
+    for sub_dir in (plot_dir_z, plot_dir_p):
+        if not os.path.isdir(sub_dir):
+            os.mkdir(sub_dir)
+        else:
+            for heatmap in os.listdir(sub_dir):
+                os.remove(os.path.join(sub_dir, heatmap))
+
     snps = process_inputs(
         args.inputs, snp_database_fp, lib_dir,
         restriction_enzymes, args.output_dir,
@@ -2195,7 +4326,17 @@ if __name__ == "__main__":
         args.fdr_threshold, args.query_databases,
         args.num_processes, args.output_dir, gene_dict_fp, snp_dict_fp,
         suppress_intermediate_files=args.suppress_intermediate_files)
-    produce_summary(
+    gene_ids = produce_summary(
          p_values, snps, genes, gene_database_fp, expression_table_fp,
-         args.fdr_threshold, args.do_not_produce_summary, args.output_dir, args.buffer_size_in,
-         args.buffer_size_out, args.num_processes_summary)
+         args.fdr_threshold, args.do_not_produce_summary, args.output_dir,
+         args.buffer_size, args.num_processes_summary)
+    build_pathway_tables(db_fp, log_fp, pathway_tsv_fp,
+                         gene_ids)
+    build_expression_tables(args.num_processes_summary,
+            expression_table_fp, hpm_map_fp, hpm_gene_exp_fp,
+            hpm_protein_exp_fp, args.hpm, db_fp, gene_exp_tsv_fp,
+            protein_exp_tsv_fp, gene_ids)
+    produce_pathway_summary(args.buffer_size, db_fp, summary_fp,
+                            args.hpm, gene_ids)
+    plot_heatmaps(db_fp, gene_ids, plot_dir_z, plot_dir_p, args.hpm,
+                  args.p_value, args.numbers)
