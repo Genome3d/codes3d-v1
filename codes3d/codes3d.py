@@ -907,13 +907,15 @@ def get_gene_expression_information(eqtls, expression_table_fp, output_dir):
         "/gene_expression_table.txt",
         sep='\t')
 
-def get_expression(args):
-    gene, tissue = args
-
+def get_expression(gene_tissue_tuple):
     try:
-        return list(GENE_DF.at[gene, tissue])
+        expression = list(GENE_DF.at[gene_tissue_tuple[0],
+                                     gene_tissue_tuple[1]])
+        return (expression, max(expression))
     except TypeError:
-        return list([GENE_DF.at[gene, tissue]])
+        expression = list([GENE_DF.at[gene_tissue_tuple[0],
+                                      gene_tissue_tuple[1]]])
+        return (expression, expression[0])
     except KeyError:
         #Foffa: to test
         #print("\t\tWarning: No expression information for %s in %s."
@@ -921,24 +923,13 @@ def get_expression(args):
         return ([], 'NA')
 
 def get_expression_extremes(gene_exp):
-    dict_copy = gene_exp.copy()
-    for tissue in dict_copy.keys():
-        dict_copy[tissue] = [exp for exp in gene_exp[tissue]
-                             if exp and exp > 0.0]
-        if not dict_copy[tissue]:
-            del dict_copy[tissue]
+    for tissue in gene_exp.keys():
+        gene_exp[tissue] = [x for x in gene_exp[tissue] if x > 0.0]
+        if not gene_exp[tissue]:
+            del gene_exp[tissue]
 
-
-    if dict_copy:
-        max_expression = max(dict_copy.iteritems(),
-                                key=lambda exp: max(exp[1]))
-        min_expression = min(dict_copy.iteritems(),
-                                key=lambda exp: min(exp[1]))
-
-        gene_exp['max_tissue'] = max_expression[0]
-        gene_exp['max_rate'] = max(max_expression[1])
-        gene_exp['min_tissue'] = min_expression[0]
-        gene_exp['min_rate'] = min(min_expression[1])
+    if not gene_exp:
+        return ('NA', 'NA', 'NA', 'NA')
 
     max_expression = max(gene_exp.items(), key=lambda exp: max(exp[1]))
     min_expression = min(gene_exp.items(), key=lambda exp: min(exp[1]))
@@ -958,22 +949,16 @@ def calc_hic_contacts(args):
         cell line
         hic_score: sum of the averages of contacts per cell line.
     """
-
-    gene, snp, snp_gene_dict = args
-
     hic_score = 0
     cell_lines = sorted(snp_gene_dict.keys())
     scores = []
-
     for cell_line in cell_lines:
         score = snp_gene_dict[cell_line]['interactions'] / float(
-                        snp_gene_dict[cell_line]['replicates'])
+                                 snp_gene_dict[cell_line]['replicates'])
         scores.append('{:.2f}'.format(score))
         hic_score += score
-
     return (', '.join(cell_lines), ', '.join(scores),
             "{:.4f}".format(hic_score))
-
 
 def produce_summary(
         p_values, snps, genes, gene_database_fp,
@@ -1121,29 +1106,28 @@ def produce_summary(
     snps_genes = list(snps_genes)
 
     current_process = psutil.Process()
-    num_processes = min(num_processes, len(current_process.cpu_affinity()))
-    pool = multiprocessing.Pool(processes=num_processes)
+    pool = multiprocessing.Pool(processes=min(num_processes,
+                                          len(current_process.cpu_affinity())))
 
-    snps = genes.keys()
-    gene_ids = list(gene_ids)
-    tissues = list(GENE_DF)
-
-    print("\n\tMultiprocessing with {} processes:".format(num_processes))
-    print("\tCollecting {} tissue-specific gene expression rates...".format(
-          len(gene_ids) * len(tissues)))
-    exp = pool.map(get_expression, [(gene, tissue)
-            for gene in gene_ids
-            for tissue in tissues])
-    gene_exp = {gene: {tissue: exp.pop(0)
-                for tissue in tissues}
-                for gene in gene_ids}
+    print("Collecting gene expression rates...")
+    expression = pool.map(get_expression, genes_tissues)
     del GENE_DF
 
-    print("\tDetermining {} gene expression extremes...".format(
-          len(gene_ids)))
-    exp_max = pool.map(get_expression_extremes,
-                 (gene_exp[gene] for gene in gene_ids))
-    gene_exp = {gene: exp_max.pop(0) for gene in gene_ids}
+    for i in range(len(genes_tissues)):
+        gene_exp[genes_tissues[i][0]][genes_tissues[i][1]] = expression[i][0]
+
+    print("Determining gene expression extremes...")
+    extremes = pool.map(get_expression_extremes,
+                        [gene_exp[gene] for gene in all_genes])
+
+    for i in range(len(all_genes)):
+        gene_exp[all_genes[i]]['max_tissue'] = extremes[i][0]
+        gene_exp[all_genes[i]]['max_rate'] = extremes[i][1]
+        gene_exp[all_genes[i]]['min_tissue'] = extremes[i][2]
+        gene_exp[all_genes[i]]['min_rate'] = extremes[i][3]
+
+    for i in range(len(genes_tissues)):
+        gene_exp[genes_tissues[i][0]][genes_tissues[i][1]] = expression[i][1]
 
     print("Computing HiC data...")
     hic_data = pool.map(calc_hic_contacts,
