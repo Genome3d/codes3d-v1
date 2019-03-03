@@ -1142,7 +1142,7 @@ def produce_summary(
     summary.close()
     sig_file.close()
 
-    return None
+    return gene_exp.keys()
 
 
 def compute_adj_pvalues(p_values):
@@ -2897,7 +2897,8 @@ def parse_input_genes(
         gene_synonym_map_fp,
         input_gene_map_fp,
         input_genes,
-        input_files):
+        input_files,
+        summary_files):
 
     """"""
     global gene_name
@@ -2911,7 +2912,14 @@ def parse_input_genes(
             with open(input_file, "r",
                       buffering=buffer_size) as input_gene_file:
                 input_genes.extend([
-                    line.strip() for line in input_gene_file])
+                    gene.strip() for gene in input_gene_file])
+
+    if summary_files:
+        for summary_file in summary_files:
+            with open(summary_file, "r", buffering=buffer_size) as summary:
+                summary_reader = csv.reader(summary, delimiter="\t")
+                next(summary_reader)
+                input_genes.extend([line[3] for line in summary_reader])
 
     input_genes = [input_genes[i]
                    for i in range(len(input_genes))
@@ -3816,11 +3824,13 @@ def plot_heatmaps(
                 custom_patches = [
                  Patch(facecolor="black", edgecolor="black",
                        label="Upregulatory Protein Interaction"),
+                 Patch(facecolor="grey", edgecolor="black",
+                       label="Not Applicable or Contradictory Data"),
                  Patch(facecolor="white", edgecolor="black",
                        label="Downregulatory Protein Interaction")]
 
                 leg_ax.legend(handles=custom_patches, loc="center left",
-                              frameon=False)
+                              frameon=False, mode="expand")
                 leg_ax.axis("off")
 
                 gene_gene_reg = plt.subplot(gs1[2])
@@ -4001,7 +4011,7 @@ def plot_heatmaps(
                     plt.setp(gene_gene.get_xticklabels(),
                             rotation=-90, ha="right", rotation_mode="anchor")
 
-                plt.savefig(os.path.join(plot_dir, "{}.eps".format(gene_a)),
+                plt.savefig(os.path.join(plot_dir, "{}.png".format(gene_a)),
                             format="png", dpi=300, bbox_inches="tight")
 
             plt.close(fig)
@@ -4055,10 +4065,28 @@ if __name__ == "__main__":
                         help="The number of processes for compilation of " +\
                         "the results (default: %s)." %
                         str((psutil.cpu_count() // 2)))
+    parser.add_argument("--pathway_config",
+                        default=os.path.join(
+                        os.path.dirname(__file__),
+                        "../docs/codes3d_pathway.conf"),
+                        help="Configuration file to be used.")
+    parser.add_argument("--hpm", action="store_true", default=False,
+                        help="Include protein expression data")
+    parser.add_argument("--numbers", action="store_true", default=False,
+                        help="Label the heatmap entries with the " +\
+                        "represented value.")
+    parser.add_argument("--p_value", type=float, default=0.05,
+                        help="p-value defining the range of the heatmap " +\
+                        "gradient")
+    parser.add_argument("--summary_files", nargs="+",
+                        help="List of summary files")
+
     args = parser.parse_args()
     config = configparser.ConfigParser()
     config.read(args.config)
-    lib_dir = os.path.join(os.path.dirname(__file__),config.get("Defaults", "LIB_DIR"))
+
+    lib_dir = os.path.join(os.path.dirname(__file__),config.get("Defaults",
+                                                                "LIB_DIR"))
     snp_database_fp = os.path.join(os.path.dirname(__file__),
                                    config.get("Defaults", "SNP_DATABASE_FP"))
     hic_data_dir = os.path.join(os.path.dirname(__file__),
@@ -4066,7 +4094,8 @@ if __name__ == "__main__":
     fragment_bed_fp = os.path.join(os.path.dirname(__file__),
                                    config.get("Defaults", "FRAGMENT_BED_FP"))
     fragment_database_fp = os.path.join(os.path.dirname(__file__),
-                                        config.get("Defaults", "FRAGMENT_DATABASE_FP"))
+                                        config.get("Defaults",
+                                                   "FRAGMENT_DATABASE_FP"))
     gene_bed_fp = os.path.join(os.path.dirname(__file__),
                                config.get("Defaults", "GENE_BED_FP"))
     gene_database_fp = os.path.join(os.path.dirname(__file__),
@@ -4074,7 +4103,8 @@ if __name__ == "__main__":
     eqtl_data_dir = os.path.join(os.path.dirname(__file__),
                                  config.get("Defaults", "EQTL_DATA_DIR"))
     expression_table_fp = os.path.join(os.path.dirname(__file__),
-                                       config.get("Defaults", "EXPRESSION_TABLE_FP"))
+                                       config.get("Defaults",
+                                                  "EXPRESSION_TABLE_FP"))
     gene_dict_fp = os.path.join(os.path.dirname(__file__),
                                        config.get("Defaults", "GENE_DICT_FP"))
     snp_dict_fp = os.path.join(os.path.dirname(__file__),
@@ -4084,13 +4114,82 @@ if __name__ == "__main__":
     GTEX_CERT = os.path.join(os.path.dirname(__file__),
                              config.get("Defaults", "GTEX_CERT"))
     HIC_RESTRICTION_ENZYMES = [e.strip() for e in \
-                                config.get("Defaults", "HIC_RESTRICTION_ENZYMES").split(',')]
+                                config.get("Defaults",
+                                    "HIC_RESTRICTION_ENZYMES").split(',')]
     restriction_enzymes, include_cell_lines, exclude_cell_lines =\
         parse_parameters(args.restriction_enzymes, \
                          args.include_cell_lines, \
                          args.exclude_cell_lines)
+
+    pathway_config = configparser.ConfigParser()
+    pathway_config.read(args.pathway_config)
+
+    gene_synonym_map_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("LIB", "gene_synonym_map_fp"))
+
+    hpm_gene_exp_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("LIB", "hpm_gene_exp_fp"))
+
+    hpm_map_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("LIB", "hpm_map_fp"))
+
+    hpm_protein_exp_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("LIB", "hpm_protein_exp_fp"))
+
+    input_gene_map_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "input_gene_map_fp"))
+
+    log_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "log_fp"))
+
+    db_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "db_fp"))
+
+    pathway_tsv_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "pathway_tsv_fp"))
+
+    gene_exp_tsv_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "gene_exp_tsv_fp"))
+
+    protein_exp_tsv_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "protein_exp_tsv_fp"))
+
+    summary_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "summary_fp"))
+
+    plot_dir = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "plot_dir"))
+
+    plot_dir_z = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "plot_dir_z"))
+
+    plot_dir_p = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "plot_dir_p"))
+
+    out_dir = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("OUT", "out_dir"))
+
     if not os.path.isdir(args.output_dir):
         os.makedirs(args.output_dir)
+
+    heatmap_dir = os.path.join(args.output_dir,
+            os.path.basename(os.path.normpath(plot_dir)))
+
+    if not os.path.isdir(heatmap_dir):
+        os.mkdir(heatmap_dir)
+
+    plot_dir_z = os.path.join(heatmap_dir,
+                            os.path.basename(os.path.normpath(plot_dir_z)))
+    plot_dir_p = os.path.join(heatmap_dir,
+                            os.path.basename(os.path.normpath(plot_dir_p)))
+
+    for sub_dir in (plot_dir_z, plot_dir_p):
+        if not os.path.isdir(sub_dir):
+            os.mkdir(sub_dir)
+        else:
+            for heatmap in os.listdir(sub_dir):
+                os.remove(os.path.join(sub_dir, heatmap))
+
     snps = process_inputs(
         args.inputs, snp_database_fp, lib_dir,
         restriction_enzymes, args.output_dir,
@@ -4106,8 +4205,18 @@ if __name__ == "__main__":
         args.fdr_threshold, args.local_databases_only,
         args.num_processes, args.output_dir, gene_dict_fp, snp_dict_fp,
         suppress_intermediate_files=args.suppress_intermediate_files)
-    produce_summary(
+    gene_ids = produce_summary(
         p_values, snps, genes, gene_database_fp, expression_table_fp,
         args.fdr_threshold, args.output_dir, args.buffer_size,
         args.num_processes_summary)
+    build_pathway_tables(db_fp, log_fp, pathway_tsv_fp,
+                         gene_ids)
+    build_expression_tables(args.num_processes_summary,
+            expression_table_fp, hpm_map_fp, hpm_gene_exp_fp,
+            hpm_protein_exp_fp, args.hpm, db_fp, gene_exp_tsv_fp,
+            protein_exp_tsv_fp, gene_ids)
+    produce_pathway_summary(args.buffer_size, db_fp, summary_fp,
+                            args.hpm, gene_ids)
+    plot_heatmaps(db_fp, gene_ids, plot_dir_z, plot_dir_p, args.hpm,
+                  args.p_value, args.numbers)
 
