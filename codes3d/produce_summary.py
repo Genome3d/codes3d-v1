@@ -28,6 +28,10 @@ if __name__ == "__main__":
             help="The FDR threshold to consider an eQTL statistically "+\
             "significant (default: 0.05).")
     parser.add_argument(
+            "-d", "--do_not_produce_summary", action="store_true",default=False,
+            help="Do not produce summary files, stop process after " +\
+            "querying GTEx (default: False).")
+    parser.add_argument(
             "-b","--buffer_size",type=int,default=1048576,
             help="Buffer size applied to file I/O during compilation "+\
             " (default: 1048576).")
@@ -56,8 +60,9 @@ if __name__ == "__main__":
 	    os.mkdir(args.output_dir)
     p_values, snps, genes = codes3d.parse_eqtls_files(
         args.eqtls_files, snp_database_fp, gene_database_fp,
-        restriction_enzymes, lib_fp, args.output_dir, args.fdr_threshold)
+        restriction_enzymes, lib_fp, args.output_dir, args.buffer_size,
+        args.fdr_threshold)
     codes3d.produce_summary(
         p_values, snps, genes, gene_database_fp, expression_table_fp,
-        args.fdr_threshold, args.output_dir, args.buffer_size,
-        args.num_processes_summary)
+        args.fdr_threshold, args.do_not_produce_summary, args.output_dir,
+        args.buffer_size, args.num_processes_summary)
