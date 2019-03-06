@@ -936,7 +936,7 @@ def get_expression_extremes(gene_exp):
     return (max_expression[0], max(max_expression[1]), min_expression[0],
             min(min_expression[1]))
 
-def calc_hic_contacts(args):
+def calc_hic_contacts(snp_gene_dict):
     """Calculates score of HiC contacts between SNP and gene.
 
     Args:
@@ -4232,6 +4232,9 @@ if __name__ == "__main__":
     gene_synonym_map_fp = os.path.join(os.path.dirname(__file__),
         pathway_config.get("LIB", "gene_synonym_map_fp"))
 
+    gtex_gene_exp_fp = os.path.join(os.path.dirname(__file__),
+        pathway_config.get("LIB", "gtex_gene_exp_fp"))
+
     hpm_gene_exp_fp = os.path.join(os.path.dirname(__file__),
         pathway_config.get("LIB", "hpm_gene_exp_fp"))
 
@@ -4248,7 +4251,7 @@ if __name__ == "__main__":
         pathway_config.get("OUT", "log_fp"))
 
     db_fp = os.path.join(os.path.dirname(__file__),
-        pathway_config.get("OUT", "db_fp"))
+        pathway_config.get("LIB", "db_fp"))
 
     pathway_tsv_fp = os.path.join(os.path.dirname(__file__),
         pathway_config.get("OUT", "pathway_tsv_fp"))
@@ -4317,7 +4320,7 @@ if __name__ == "__main__":
     build_pathway_tables(db_fp, log_fp, pathway_tsv_fp,
                          gene_ids)
     build_expression_tables(args.num_processes_summary,
-            expression_table_fp, hpm_map_fp, hpm_gene_exp_fp,
+            gtex_gene_exp_fp, hpm_map_fp, hpm_gene_exp_fp,
             hpm_protein_exp_fp, args.hpm, db_fp, gene_exp_tsv_fp,
             protein_exp_tsv_fp, gene_ids)
     produce_pathway_summary(args.buffer_size, db_fp, summary_fp,
