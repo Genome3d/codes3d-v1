@@ -60,7 +60,7 @@ if __name__ == "__main__":
         config.get("OUT", "log_fp"))
 
     db_fp = os.path.join(os.path.dirname(__file__),
-        config.get("OUT", "db_fp"))
+        config.get("LIB", "db_fp"))
 
     pathway_tsv_fp = os.path.join(os.path.dirname(__file__),
         config.get("OUT", "pathway_tsv_fp"))

@@ -4317,6 +4317,8 @@ if __name__ == "__main__":
          p_values, snps, genes, gene_database_fp, expression_table_fp,
          args.fdr_threshold, args.do_not_produce_summary, args.output_dir,
          args.buffer_size, args.num_processes_summary)
+
+    gene_name = GeneName(gene_synonym_map_fp)
     build_pathway_tables(db_fp, log_fp, pathway_tsv_fp,
                          gene_ids)
     build_expression_tables(args.num_processes_summary,
