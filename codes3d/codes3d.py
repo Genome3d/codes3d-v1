@@ -3626,17 +3626,19 @@ def cluster_genes(tissues, genes, expr, position):
         no_expression.extend(no_data)
         exclude = no_expression
 
-    distr = {gene: np.array([expr[gene][tissue] for tissue in tissues])
-             for gene in genes}
-    dist_mat = np.nan_to_num(np.array([[abs(st.spearmanr(
-                             distr[genes[i]], distr[genes[j]])[0])
-                      if j < i else np.nan
-                      for j in range(len(genes))]
-                      for i in range(len(genes))]))
-    link_mat = cl.hierarchy.linkage(dist_mat, "complete",
-                                    optimal_ordering=True)
+    if len(genes) > 2:
+        distr = {gene: np.array([expr[gene][tissue] for tissue in tissues])
+                for gene in genes}
+        dist_mat = np.nan_to_num(np.array([[abs(st.spearmanr(
+                                distr[genes[i]], distr[genes[j]])[0])
+                        if j < i else np.nan
+                        for j in range(len(genes))]
+                        for i in range(len(genes))]))
+        link_mat = cl.hierarchy.linkage(dist_mat, "complete",
+                                        optimal_ordering=True)
 
-    genes = [genes[i] for i in cl.hierarchy.leaves_list(link_mat)]
+        genes = [genes[i] for i in cl.hierarchy.leaves_list(link_mat)]
+
     if position:
         exclude.extend(genes)
         return exclude
@@ -3861,22 +3863,24 @@ def plot_heatmaps(
                         scale*(1+len(upstream_genes)+len(downstream_genes))))
 
                 if hpm:
-                    gs = gridspec.GridSpec(3, 1, hspace=1/(1+len(upstream_genes) +
-                                        len(downstream_genes)),
+                    gs = gridspec.GridSpec(3, 1,
                                         height_ratios=[
                                             (1+len(upstream_genes)+
                                                 len(downstream_genes)),
                                             (1+len(upstream_genes)+
                                                 len(downstream_genes)),
-                                            1])
+                                            1],
+                       hspace=1/(1+len(upstream_genes) +
+                                len(downstream_genes)))
 
                 else:
-                    gs = gridspec.GridSpec(2, 1, hspace=1/(1+len(upstream_genes) +
-                                        len(downstream_genes)),
+                    gs = gridspec.GridSpec(2, 1,
                                         height_ratios=[
                                             (1+len(upstream_genes)+
                                                 len(downstream_genes)),
-                                            1])
+                                            1],
+                       hspace=1/(1+len(upstream_genes) +
+                                len(downstream_genes)))
 
 
                 gs1 = gridspec.GridSpecFromSubplotSpec(3, 2,
@@ -3927,7 +3931,7 @@ def plot_heatmaps(
                  Patch(facecolor="white", edgecolor="black",
                        label="Downregulatory Protein Interaction")]
 
-                leg_ax.legend(handles=custom_patches, loc="center left",
+                leg_ax.legend(handles=custom_patches, loc="lower left",
                               frameon=False, mode="expand")
                 leg_ax.axis("off")
 
@@ -4112,7 +4116,7 @@ def plot_heatmaps(
                 plt.savefig(os.path.join(plot_dir, "{}.png".format(gene_a)),
                             format="png", dpi=300, bbox_inches="tight")
 
-            plt.close(fig)
+                plt.close()
             gene_num.update(i)
         gene_num.finish()
     return None
