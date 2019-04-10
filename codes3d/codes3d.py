@@ -4019,8 +4019,7 @@ def plot_heatmaps(
                         width_ratios=[1, len(tissues)],
                         height_ratios=[len(upstream_genes), 1,
                             len(downstream_genes)],
-                       wspace=1/(2+2*(len(upstream_genes) +
-                                len(downstream_genes))),
+                       wspace= 0.05,
                        hspace=1/(2+2*(len(upstream_genes) +
                                 len(downstream_genes))))
 
@@ -4030,24 +4029,21 @@ def plot_heatmaps(
                             width_ratios=[1, len(tissues)],
                             height_ratios=[len(upstream_genes), 1,
                                 len(downstream_genes)],
-                        wspace=1/(2+2*(len(upstream_genes) +
-                                    len(downstream_genes))),
+                        wspace= 0.05,
                         hspace=1/(2+2*(len(upstream_genes) +
                                     len(downstream_genes))))
                 if hpm:
                     gs3 = gridspec.GridSpecFromSubplotSpec(1, 2,
                             subplot_spec=gs[2],
                             width_ratios=[1+len(tissues)-10, 10],
-                        wspace=1/(2+2*(len(upstream_genes) +
-                                    len(downstream_genes))),
+                        wspace= 0.05,
                         hspace=1/(2+2*(len(upstream_genes) +
                                     len(downstream_genes))))
                 else:
                     gs3 = gridspec.GridSpecFromSubplotSpec(1, 2,
                             subplot_spec=gs[1],
                             width_ratios=[1+len(tissues)-10, 10],
-                        wspace=1/(2+2*(len(upstream_genes) +
-                                    len(downstream_genes))),
+                        wspace= 0.05,
                         hspace=1/(2+2*(len(upstream_genes) +
                                     len(downstream_genes))))
 
